@@ -254,6 +254,7 @@ Item {
     property string tag: ""
     property var handler: null
     property bool busy: false
+    property string lastCommand: ""
 
     stdout: StdioCollector { id: reqOut; waitForEnd: true }
     stderr: StdioCollector { id: reqErr; waitForEnd: true }
@@ -276,6 +277,7 @@ Item {
       }
       command.push(url)
       req.command = command
+      req.lastCommand = command.join(" ")
       req.running = true
       return true
     }
@@ -285,9 +287,18 @@ Item {
       var error = String(reqErr.text || "").trim()
       var callback = req.handler
       req.handler = null
-      req.busy = false
-      if (callback) callback(exitCode, body, error)
-      Qt.callLater(root.drainQueue)
+
+      // The slot stays busy until the callback has run and the stack has
+      // unwound. Endurance fetches enqueue their next hop from inside their
+      // own callback; releasing the slot first let the drain hand that hop
+      // straight back to this Process while it was still inside onExited, and
+      // the new command was swallowed — the handler then read the previous
+      // response. That is how asking for Le Mans returned São Paulo.
+      Qt.callLater(function() {
+        req.busy = false
+        if (callback) callback(exitCode, body, error)
+        root.drainQueue()
+      })
     }
   }
 
@@ -319,10 +330,23 @@ Item {
 
   readonly property string cacheDir: Quickshell.env("HOME") + "/.cache/omarchy/meirdick.scores"
 
-  function etagPathFor(key) {
-    // curl writes the ETag here and compares against it on the next request; a
-    // 304 then comes back as an empty body, which costs nothing to receive.
-    return root.cacheDir + "/" + String(key).replace(/[^A-Za-z0-9._-]/g, "_") + ".etag"
+  // curl writes the ETag here and compares against it on the next request; a
+  // 304 then comes back as an empty body, which costs nothing to receive.
+  //
+  // Keyed by the URL, never by the league. An endurance league's URL changes
+  // when the event does, and a per-league key meant the ETag from São Paulo's
+  // classification was sent when asking for Le Mans — the server answered 304
+  // and the panel kept showing the wrong race while the fetch logged the right
+  // one.
+  function etagPathFor(url) {
+    var text = String(url)
+    // A URL is far too long and too full of separators to be a filename, so a
+    // short hash of it is the key, with a readable prefix to keep the cache
+    // directory diagnosable by eye.
+    var hash = 5381
+    for (var i = 0; i < text.length; i++) hash = ((hash * 33) ^ text.charCodeAt(i)) >>> 0
+    var host = text.replace(/^https?:\/\//, "").split("/")[0].replace(/[^A-Za-z0-9.-]/g, "_")
+    return root.cacheDir + "/" + host + "-" + hash.toString(36) + ".etag"
   }
 
   Process { id: mkCache; command: ["mkdir", "-p", root.cacheDir] }
@@ -367,15 +391,100 @@ Item {
   // event and its sessions, and the classification itself is a separate CSV.
   // Everything else is one request, so this sits beside the normal path rather
   // than complicating it.
+  // Resolved season/event per pinned league, and when each league was last
+  // fetched. Both exist because of how the results site behaves — see below.
+  property var enduranceEvent: ({})
+  property var enduranceFetchedMs: ({})
+
+  // Discovery on the results site is unreliable — the event a page describes
+  // is shared server-side state that any visitor can change, so asking for a
+  // past round returns whatever somebody else selected. The classification CSV
+  // it eventually points at, though, is a static file: stable, byte-identical
+  // on every request, unaffected by that state.
+  //
+  // So discovery only has to succeed once. What it finds is written here and
+  // used directly from then on, which turns a flaky navigation into a one-off.
+  readonly property string enduranceCachePath: root.cacheDir + "/endurance.json"
+  property var enduranceResolved: ({})
+
+  FileView {
+    id: enduranceCache
+    path: root.enduranceCachePath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      try {
+        var parsed = JSON.parse(text())
+        if (parsed && typeof parsed === "object") root.enduranceResolved = parsed
+      } catch (e) {
+        // A truncated write. The next discovery replaces it.
+      }
+    }
+  }
+
+  function rememberEnduranceUrl(league, session) {
+    var next = {}
+    for (var key in root.enduranceResolved) next[key] = root.enduranceResolved[key]
+    next[league] = {
+      url: Endurance.classificationUrl(league, session),
+      event: session.event,
+      session: session.session,
+      hour: session.hour,
+      stamp: session.stamp
+    }
+    root.enduranceResolved = next
+    enduranceCache.setText(JSON.stringify(next, null, 2))
+  }
+
   function fetchEndurance(league, forBrowse) {
     // Results, not live timing — so this is fetched on the slow cadence and
     // only ever for today's set. Browsing to another day cannot change a
     // finished classification.
     if (forBrowse) { finishLeague(); return }
 
+    // A finished classification does not change. Re-reading it every poll adds
+    // nothing and, on this site, actively causes harm — see the session note
+    // below. Half an hour is plenty to notice a new race.
+    var lastFetch = root.enduranceFetchedMs[league] || 0
+    if (root.gamesByLeague[league] !== undefined && (Date.now() - lastFetch) < 1800000) {
+      finishLeague()
+      return
+    }
+
+    // The results site keeps the selected event in a PHP session that is
+    // shared by every client — the same PHPSESSID comes back for everyone — so
+    // "which event does index.php describe" is global server state that any
+    // request can change. Asking for the landing page and then the event page
+    // therefore races: another request in between re-points the session, and
+    // the event page answers with somebody else's race.
+    //
+    // So the landing page is read exactly once, to learn which season and
+    // event folder this championship wants, and after that only the explicit
+    // event URL is ever requested.
+    // Already discovered: go straight to the file, skipping the navigation
+    // that cannot be trusted.
+    var known = root.enduranceResolved[league]
+    if (known && known.url) {
+      fetchClassification(league, {
+        href: "", event: known.event, session: known.session,
+        hour: known.hour, stamp: known.stamp, path: "", file: ""
+      }, known.url)
+      return
+    }
+
+    var resolved = root.enduranceEvent[league]
+    if (Endurance.isPinned(league) && resolved) {
+      fetchEnduranceEvent(league, resolved.season, resolved.event)
+      return
+    }
+
     enqueue({
       url: Endurance.indexUrl(league),
-      etagPath: root.etagPathFor("endurance-index-" + league),
+      // No ETag on any endurance request: the results site serves whichever
+      // event was selected last for this client, so the same URL does not mean
+      // the same content and a 304 can hand back the wrong race.
+      etagPath: "",
       done: function(exitCode, body, error) {
         if (exitCode !== 0) {
           root.lastError = Leagues.displayName(league) + ": " + (error || "curl exited " + exitCode)
@@ -389,39 +498,133 @@ Item {
           return
         }
 
-        var session = Endurance.pickLatest(Endurance.parseIndex(body, league))
-        if (!session) {
-          root.lastError = Leagues.displayName(league) + ": no classification published"
+        // A pinned championship — Le Mans — wants one specific round rather
+        // than whatever is current, so the season and event selectors on the
+        // landing page decide which event page to ask for next.
+        if (Endurance.isPinned(league)) {
+          var selectors = Endurance.parseSelectors(body)
+          var season = Endurance.currentSeason(selectors)
+          var wanted = Endurance.chooseEvent(league, selectors)
+          traceEndurance(league, {
+            pinned: true,
+            seasonsSeen: selectors.seasons.length,
+            eventsSeen: selectors.events.length,
+            chose: wanted ? wanted.value : "none"
+          })
+          if (!season || !wanted) {
+            root.lastError = Leagues.displayName(league) + ": event not in the archive"
+            finishLeague()
+            return
+          }
+          var remembered = {}
+          for (var key in root.enduranceEvent) remembered[key] = root.enduranceEvent[key]
+          remembered[league] = { season: season.value, event: wanted.value }
+          root.enduranceEvent = remembered
+
+          fetchEnduranceEvent(league, season.value, wanted.value)
+          return
+        }
+
+        fetchClassification(league, Endurance.pickLatest(Endurance.parseIndex(body, league)))
+      }
+    })
+  }
+
+  // One specific event of one specific season, then its classification.
+  function fetchEnduranceEvent(league, season, event) {
+    traceEndurance(league, { season: season, event_requested: event,
+                             eventUrl: Endurance.eventIndexUrl(league, season, event) })
+    enqueue({
+      url: Endurance.eventIndexUrl(league, season, event),
+      etagPath: "",
+      done: function(exitCode, body, error) {
+        if (exitCode !== 0) {
+          root.lastError = Leagues.displayName(league) + ": " + (error || "curl exited " + exitCode)
+          finishLeague()
+          return
+        }
+        var picked = Endurance.pickLatest(Endurance.parseIndex(body, league), event)
+        if (!picked) {
+          // The shared session was re-pointed by another request between ours
+          // going out and coming back. Say nothing rather than show the wrong
+          // race under this name; the next refresh will try again.
+          root.lastError = Leagues.displayName(league) + ": results page returned another event"
+          finishLeague()
+          return
+        }
+        fetchClassification(league, picked)
+      }
+    })
+  }
+
+  // The last hop: one classification CSV into one normalized event.
+  // What each endurance league resolved to, for diagnose(). A wrong event is
+  // otherwise indistinguishable from a right one until you read the panel.
+  property var enduranceTrace: ({})
+
+  function traceEndurance(league, note) {
+    var next = {}
+    for (var key in root.enduranceTrace) next[key] = root.enduranceTrace[key]
+    var merged = {}
+    var existing = next[league] || {}
+    for (var a in existing) merged[a] = existing[a]
+    for (var b in note) merged[b] = note[b]
+    next[league] = merged
+    root.enduranceTrace = next
+  }
+
+  function fetchClassification(league, session, knownUrl) {
+    traceEndurance(league, session
+      ? { event: session.event, session: session.session, hour: session.hour,
+          url: Endurance.classificationUrl(league, session) }
+      : { event: "none" })
+    if (!session) {
+      root.lastError = Leagues.displayName(league) + ": no classification published"
+      finishLeague()
+      return
+    }
+
+    var csvUrl = knownUrl ? knownUrl : Endurance.classificationUrl(league, session)
+    if (csvUrl === "") { finishLeague(); return }
+    // Only a freshly discovered session is worth writing down; replaying a
+    // cached one would rewrite the same file every half hour.
+    if (!knownUrl) rememberEnduranceUrl(league, session)
+
+    // Car numbers followed in this championship, so the entry you care about
+    // is shown wherever it finished rather than only the podium.
+    var wantedNumbers = []
+    for (var i = 0; i < root.follows.length; i++) {
+      var parts = root.follows[i].split(":")
+      if (parts[0] === league && parts[1]) wantedNumbers.push(parts[1])
+    }
+
+    enqueue({
+      url: csvUrl,
+      etagPath: "",
+      done: function(csvExit, csvBody, csvError) {
+        if (csvExit !== 0) {
+          root.lastError = Leagues.displayName(league) + ": " + (csvError || "curl exited " + csvExit)
+          finishLeague()
+          return
+        }
+        if (String(csvBody).trim() === "" && root.gamesByLeague[league] !== undefined) {
           finishLeague()
           return
         }
 
-        var csvUrl = Endurance.classificationUrl(league, session)
-        if (csvUrl === "") { finishLeague(); return }
-
-        enqueue({
-          url: csvUrl,
-          etagPath: root.etagPathFor("endurance-csv-" + league),
-          done: function(csvExit, csvBody, csvError) {
-            if (csvExit !== 0) {
-              root.lastError = Leagues.displayName(league) + ": " + (csvError || "curl exited " + csvExit)
-              finishLeague()
-              return
-            }
-            if (String(csvBody).trim() === "" && root.gamesByLeague[league] !== undefined) {
-              finishLeague()
-              return
-            }
-
-            var rows = Endurance.parseClassification(csvBody)
-            var game = Endurance.toGame(league, session, rows, Date.now())
-            var next = {}
-            for (var key in root.gamesByLeague) next[key] = root.gamesByLeague[key]
-            next[league] = game ? [game] : []
-            root.gamesByLeague = next
-            finishLeague()
-          }
-        })
+        var rows = Endurance.parseClassification(csvBody)
+        // This league is healthy now; do not keep showing why it once was not.
+        root.lastError = ""
+        var game = Endurance.toGame(league, session, rows, Date.now(), wantedNumbers)
+        var stamped = {}
+        for (var f in root.enduranceFetchedMs) stamped[f] = root.enduranceFetchedMs[f]
+        stamped[league] = Date.now()
+        root.enduranceFetchedMs = stamped
+        var next = {}
+        for (var key in root.gamesByLeague) next[key] = root.gamesByLeague[key]
+        next[league] = game ? [game] : []
+        root.gamesByLeague = next
+        finishLeague()
       }
     })
   }
@@ -440,11 +643,9 @@ Item {
 
     // The ETag is per league, per provider and per date — sharing one across
     // dates would serve yesterday's card as "unchanged".
-    var etagPath = root.etagPathFor(providerName + "-" + league + "-" + Providers.isoDate(date))
-
     enqueue({
       url: url,
-      etagPath: etagPath,
+      etagPath: root.etagPathFor(url),
       done: function(exitCode, body, error) {
         if (exitCode !== 0) {
           if (index + 1 < chain.length) { fetchLeagueVia(league, date, chain, index + 1, forBrowse); return }
@@ -462,6 +663,7 @@ Item {
         }
 
         var parsed = provider.parseScoreboard(body, league, Date.now())
+        if (parsed.ok) root.lastError = ""
         if (!parsed.ok) {
           if (index + 1 < chain.length) { fetchLeagueVia(league, date, chain, index + 1, forBrowse); return }
           root.lastError = Leagues.displayName(league) + ": " + parsed.error
@@ -610,7 +812,7 @@ Item {
       root.teamsLoading = true
 
       enqueue({
-        url: url, etagPath: root.etagPathFor("teams-" + league),
+        url: url, etagPath: root.etagPathFor(url),
         done: (function(slug) {
           return function(exitCode, body) {
             root.teamsLoading = false
@@ -821,6 +1023,8 @@ Item {
       queued: root.queue.length,
       lastRefreshMs: root.lastRefreshMs,
       lastError: root.lastError,
+      endurance: root.enduranceTrace,
+      enduranceResolved: root.enduranceResolved,
       primed: root.primed,
       notifications: {
         start: root.notifyStart, score: root.notifyScore,

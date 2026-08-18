@@ -1343,22 +1343,22 @@ Panel {
                 anchors.right: entrantDetail.left
                 anchors.rightMargin: Style.space(8)
                 anchors.verticalCenter: parent.verticalCenter
-                text: modelData.name
+                text: String(modelData.name || "")
                 elide: Text.ElideRight
-                color: index === 0 ? root.foreground : root.dim
+                color: index === 0 || modelData.followed ? root.foreground : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
-                font.bold: index === 0
+                font.bold: index === 0 || modelData.followed === true
               }
               Text {
                 id: entrantDetail
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
                 text: String(modelData.detail || "")
-                color: index === 0 ? root.foreground : root.dim
+                color: index === 0 || modelData.followed ? root.foreground : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
-                font.bold: index === 0
+                font.bold: index === 0 || modelData.followed === true
               }
             }
           }

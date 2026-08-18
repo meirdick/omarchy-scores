@@ -44,6 +44,7 @@ var CATALOG = {
   "wec":  { name: "FIA WEC",   group: "Racing", espn: "", individual: true, endurance: true },
   "elms": { name: "Le Mans Series", group: "Racing", espn: "", individual: true, endurance: true },
   "imsa": { name: "IMSA",      group: "Racing", espn: "", individual: true, endurance: true },
+  "lemans": { name: "24 Hours of Le Mans", group: "Racing", espn: "", individual: true, endurance: true },
 
   // ---- Individual sports. No teams to follow, so these are browse-only.
   "ufc": { name: "UFC", group: "Other", espn: "mma/ufc", individual: true },
@@ -58,7 +59,7 @@ var CATALOG = {
 var BROWSE_ORDER = [
   "nfl", "ncaaf", "nba", "wnba", "ncaam", "mlb", "nhl",
   "eng.1", "esp.1", "ger.1", "ita.1", "fra.1", "ucl", "uel", "mls", "wc",
-  "f1", "indycar", "nascar", "nascar-2", "nascar-3", "wec", "elms", "imsa",
+  "f1", "indycar", "nascar", "nascar-2", "nascar-3", "lemans", "wec", "elms", "imsa",
   "ufc", "pga", "atp"
 ];
 

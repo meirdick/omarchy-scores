@@ -6,7 +6,12 @@ it with today's card, league scoreboards, standings and per-game detail.
 
 Built for Omarchy 4 (`shell/plugins`, `manifest.json`, `~/.config/omarchy/plugins/`).
 
-![The panel showing today's games](preview.png)
+![Today's card: a followed club, and the Le Mans result with a followed car](preview.png)
+
+<p align="center">
+  <img src="docs/leagues.png" width="45%" alt="Browsing leagues, each with its own mark">
+  <img src="docs/standings.png" width="45%" alt="Standings, ordered the way the sport is read">
+</p>
 
 ## Install
 
@@ -265,7 +270,32 @@ live positions would mean reverse-engineering a private protocol that can
 change without warning. A finished race read from the official classification
 is worth more than a live feed that breaks mid-season.
 
-Two things worth knowing if you touch this code:
+Follow a specific car by its number and it is shown wherever it finished,
+alongside the podium — because 32nd overall is still the result you opened the
+panel for:
+
+```bash
+omarchy-shell meirdick.scores followLeague lemans
+omarchy-shell meirdick.scores follow lemans 24
+```
+
+A followed entry is named by its number and its driver rather than its team,
+and carries its **class** position. Sports car racing runs several classes at
+once — at Le Mans, Hypercar, LMP2 and LMGT3 — and they are not racing each
+other. An LMP2 car finishing 32nd overall is 32nd behind a faster class it was
+never in; `LMP2 P18/19` is the result that means something.
+
+Discovery is the fragile part, and it is deliberately done once. The results
+site keeps the selected event in a PHP session shared by every visitor — the
+same `PHPSESSID` comes back for everyone — so which event a page describes is
+global state that any other visitor can change, and asking for a past round can
+return somebody else's race. The classification CSV it points at, though, is a
+static file: byte-identical on every request and unaffected by that state. So
+what discovery finds is written to `~/.cache/omarchy/meirdick.scores/endurance.json`
+and used directly from then on, and a page describing the wrong event is
+rejected rather than displayed.
+
+Two more things worth knowing if you touch this code:
 
 - The columns differ by championship *and* by session. A WEC race publishes
   `POSITION;NUMBER;TEAM;DRIVER_1..4;VEHICLE`, a WEC practice publishes
