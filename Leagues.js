@@ -38,6 +38,13 @@ var CATALOG = {
   "nascar-2": { name: "NASCAR Xfinity", group: "Racing", espn: "racing/nascar-secondary", individual: true },
   "nascar-3": { name: "NASCAR Trucks", group: "Racing", espn: "racing/nascar-truck", individual: true },
 
+  // ---- Sports car racing, including Le Mans. Not on ESPN at all; served by
+  // Al Kamel's official classifications. Results only, never live — see
+  // Endurance.js.
+  "wec":  { name: "FIA WEC",   group: "Racing", espn: "", individual: true, endurance: true },
+  "elms": { name: "Le Mans Series", group: "Racing", espn: "", individual: true, endurance: true },
+  "imsa": { name: "IMSA",      group: "Racing", espn: "", individual: true, endurance: true },
+
   // ---- Individual sports. No teams to follow, so these are browse-only.
   "ufc": { name: "UFC", group: "Other", espn: "mma/ufc", individual: true },
   "pga": { name: "PGA", group: "Other", espn: "golf/pga", individual: true },
@@ -51,7 +58,7 @@ var CATALOG = {
 var BROWSE_ORDER = [
   "nfl", "ncaaf", "nba", "wnba", "ncaam", "mlb", "nhl",
   "eng.1", "esp.1", "ger.1", "ita.1", "fra.1", "ucl", "uel", "mls", "wc",
-  "f1", "indycar", "nascar", "nascar-2", "nascar-3",
+  "f1", "indycar", "nascar", "nascar-2", "nascar-3", "wec", "elms", "imsa",
   "ufc", "pga", "atp"
 ];
 
@@ -67,14 +74,15 @@ function resolve(slug) {
     return {
       id: id, name: known.name, group: known.group, espn: known.espn,
       statsapi: known.statsapi || 0, nhlweb: known.nhlweb === true,
-      individual: known.individual === true, logo: known.logo || "", known: true
+      individual: known.individual === true, endurance: known.endurance === true,
+      logo: known.logo || "", known: true
     }
   }
   var espn = id.indexOf("/") >= 0 ? id : (/^[a-z]{3}\.\d+$/.test(id) ? "soccer/" + id : "")
   if (espn === "") return null
   return {
     id: id, name: id, group: "Other", espn: espn,
-    statsapi: 0, nhlweb: false, individual: false, logo: "", known: false
+    statsapi: 0, nhlweb: false, individual: false, endurance: false, logo: "", known: false
   }
 }
 
@@ -106,6 +114,11 @@ function group(slug) {
   return league ? league.group : "Other"
 }
 
+function isEndurance(slug) {
+  var league = resolve(slug)
+  return league ? league.endurance : false
+}
+
 function isIndividual(slug) {
   var league = resolve(slug)
   return league ? league.individual : false
@@ -117,6 +130,8 @@ function isIndividual(slug) {
 function providersFor(slug, overrides) {
   var league = resolve(slug)
   if (!league) return []
+  // Endurance has exactly one source and it is not ESPN.
+  if (league.endurance) return ["endurance"]
   var capable = ["espn"]
   if (league.statsapi) capable.push("mlb")
   if (league.nhlweb) capable.push("nhl")
@@ -150,6 +165,7 @@ if (typeof module !== "undefined") {
     group: group,
     isIndividual: isIndividual,
     providersFor: providersFor, logoFor: logoFor, shortLabel: shortLabel,
+    isEndurance: isEndurance,
     browseList: browseList
   }
 }

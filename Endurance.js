@@ -1,0 +1,310 @@
+// Sports car racing: the FIA WEC (which is where Le Mans lives), the European
+// Le Mans Series, and IMSA.
+//
+// None of them have a free JSON API, and ESPN carries no sports car racing at
+// all. What they do have is Al Kamel Systems, who time all three and publish
+// the official classification for every session as semicolon-delimited CSV.
+// This reads those.
+//
+// The deliberate limitation: this is the last completed session, not live
+// timing. Al Kamel's live app talks DDP over a websocket and every plausible
+// JSON path returns the application shell instead of data, so live positions
+// would mean reverse-engineering a private protocol. A finished race read from
+// the official classification is worth more than a live feed that breaks.
+
+var CHAMPIONSHIPS = {
+  wec: {
+    name: "FIA WEC",
+    index: "https://fiawec.alkamelsystems.com/index.php",
+    base: "https://fiawec.alkamelsystems.com/"
+  },
+  elms: {
+    name: "European Le Mans Series",
+    index: "https://elms.alkamelsystems.com/index.php",
+    base: "https://elms.alkamelsystems.com/"
+  },
+  imsa: {
+    name: "IMSA SportsCar Championship",
+    // The bare root, not index.php: index.php answers 302 with a Location that
+    // is missing the slash between host and path, so it cannot be followed.
+    index: "https://results.imsa.com/",
+    // results.imsa.com answers every file with a 302 whose Location is missing
+    // the slash between host and path — "…alkamelcloud.comResults/…" — so it
+    // cannot be followed. The corrected host is requested directly instead.
+    base: "https://imsa.results.alkamelcloud.com/"
+  }
+}
+
+function championship(slug) {
+  return CHAMPIONSHIPS.hasOwnProperty(String(slug)) ? CHAMPIONSHIPS[String(slug)] : null
+}
+
+function isEnduranceLeague(slug) { return championship(slug) !== null }
+
+function indexUrl(slug) {
+  var meta = championship(slug)
+  return meta ? meta.index : ""
+}
+
+function decode(text) {
+  try { return decodeURIComponent(String(text)) } catch (e) { return String(text) }
+}
+
+// Every result link on the index page, parsed into something sortable.
+//
+// A path looks like:
+//   Results/15_2026/04_SAO PAULO/666_FIA WEC/202607121130_Race/06_Hour 6/03_Classification_Race_Hour 6.CSV
+// The 12-digit stamp orders sessions within an event, and a race is split into
+// one classification per hour, so the hour orders them within the race.
+function parseIndex(text, slug) {
+  var lines = String(text || "").split(/["'\s<>]+/)
+  var seen = {}, sessions = []
+
+  for (var i = 0; i < lines.length; i++) {
+    var raw = lines[i]
+    if (raw.indexOf("Results/") !== 0 || !/\.CSV$/i.test(raw)) continue
+    var path = decode(raw)
+    // 03_ is the classification family. 23_Analysis, 26_Weather and
+    // 27_Transponder are different documents entirely.
+    var file = path.split("/").pop()
+    if (!/^03_/.test(file)) continue
+    if (seen[raw]) continue
+    seen[raw] = true
+
+    var stamp = ""
+    var stampMatch = path.match(/\/(\d{12})_/)
+    if (stampMatch) stamp = stampMatch[1]
+
+    var sessionMatch = path.match(/\/\d{12}_([^/]+)/)
+    var session = sessionMatch ? sessionMatch[1] : ""
+
+    // The hour folder between the session and the file. WEC writes "06_Hour 6",
+    // ELMS writes plain "Hour 1"; read the number wherever it sits.
+    var hour = 0
+    var hourMatch = path.match(/\/(?:(\d{1,2})_)?Hour\s*(\d+)\//i)
+    if (hourMatch) hour = parseInt(hourMatch[2] || hourMatch[1], 10)
+
+    var eventMatch = path.match(/^Results\/[^/]+\/([^/]+)\//)
+    sessions.push({
+      href: raw,
+      path: path,
+      stamp: stamp,
+      session: session,
+      hour: hour,
+      event: eventMatch ? cleanEventName(eventMatch[1]) : "",
+      file: file
+    })
+  }
+  return sessions
+}
+
+// "04_SAO PAULO" -> "Sao Paulo". The leading number is a running order, and
+// the names are shouted.
+function cleanEventName(raw) {
+  var name = String(raw || "").replace(/^\d+_/, "").replace(/_/g, " ").trim()
+  if (name === "") return ""
+  if (name !== name.toUpperCase()) return name
+  return name.toLowerCase().replace(/(^|[\s(\-])([a-z])/g, function(all, lead, letter) {
+    return lead + letter.toUpperCase()
+  })
+}
+
+// Rank a session so the most interesting finished one wins:
+//   a race beats qualifying beats practice
+//   a later hour of a race beats an earlier one
+//   an official classification beats a provisional or unofficial one
+function scoreSession(entry) {
+  var name = (entry.session + " " + entry.file).toLowerCase()
+  var kind = 0
+  if (/race|hours|hour/.test(name)) kind = 3
+  else if (/hyperpole|qualifying/.test(name)) kind = 2
+  else if (/practice|test|warm/.test(name)) kind = 1
+
+  var certainty = 1
+  if (/unofficial/.test(name)) certainty = 0
+  else if (/provisional/.test(name)) certainty = 1
+  else if (/official|classification/.test(name)) certainty = 2
+
+  return { kind: kind, certainty: certainty }
+}
+
+// The one session to show. Sorted by when it ran first, because a stale race
+// from a previous event must never outrank the current weekend.
+function pickLatest(sessions) {
+  if (!sessions || sessions.length === 0) return null
+  var best = null
+  for (var i = 0; i < sessions.length; i++) {
+    var entry = sessions[i]
+    var rank = scoreSession(entry)
+    entry._kind = rank.kind
+    entry._certainty = rank.certainty
+    if (best === null) { best = entry; continue }
+    if (entry.stamp !== best.stamp) { if (entry.stamp > best.stamp) best = entry; continue }
+    if (entry._kind !== best._kind) { if (entry._kind > best._kind) best = entry; continue }
+    if (entry.hour !== best.hour) { if (entry.hour > best.hour) best = entry; continue }
+    if (entry._certainty > best._certainty) best = entry
+  }
+  return best
+}
+
+function classificationUrl(slug, entry) {
+  var meta = championship(slug)
+  if (!meta || !entry) return ""
+  return meta.base + entry.href
+}
+
+// Header-driven, because the columns differ by championship and by session
+// type: a WEC race publishes POSITION;NUMBER;TEAM;DRIVER_1..4;VEHICLE, a WEC
+// practice publishes POS;NUMBER;LAP;TIME;…, and IMSA publishes
+// POSITION;NUMBER;STATUS;LAPS;TOTAL_TIME;GAP_FIRST;…. Reading by index would
+// silently mislabel every one of them.
+function parseClassification(text) {
+  var raw = String(text || "")
+  // The files are UTF-8 with a BOM, which otherwise becomes part of the first
+  // column name and makes every lookup miss.
+  if (raw.charCodeAt(0) === 0xFEFF) raw = raw.slice(1)
+  var lines = raw.split(/\r?\n/).filter(function(line) { return line.trim() !== "" })
+  if (lines.length < 2) return []
+
+  var header = lines[0].split(";").map(function(name) { return name.trim().toUpperCase() })
+  function columnOf(names) {
+    for (var i = 0; i < names.length; i++) {
+      var at = header.indexOf(names[i])
+      if (at >= 0) return at
+    }
+    return -1
+  }
+
+  var col = {
+    position: columnOf(["POSITION", "POS"]),
+    number: columnOf(["NUMBER"]),
+    team: columnOf(["TEAM"]),
+    cls: columnOf(["CLASS"]),
+    laps: columnOf(["LAPS", " LAPS"]),
+    gap: columnOf(["GAP_FIRST"]),
+    vehicle: columnOf(["VEHICLE"]),
+    status: columnOf(["STATUS"])
+  }
+
+  var driverColumns = []
+  for (var h = 0; h < header.length; h++)
+    if (/^DRIVER_?\d+$/.test(header[h]) || /^DRIVER\d+_SECONDNAME$/.test(header[h]))
+      driverColumns.push(h)
+
+  var rows = []
+  for (var i = 1; i < lines.length; i++) {
+    var cells = lines[i].split(";")
+    function cell(index) {
+      return index >= 0 && index < cells.length ? String(cells[index]).trim() : ""
+    }
+    var position = parseInt(cell(col.position), 10)
+    if (!isFinite(position)) continue
+
+    var drivers = []
+    for (var d = 0; d < driverColumns.length; d++) {
+      var name = cell(driverColumns[d])
+      if (name !== "") drivers.push(name)
+    }
+
+    rows.push({
+      position: position,
+      number: cell(col.number),
+      team: cell(col.team),
+      cls: cell(col.cls),
+      laps: cell(col.laps),
+      gap: cell(col.gap),
+      vehicle: cell(col.vehicle),
+      status: cell(col.status),
+      drivers: drivers
+    })
+  }
+  rows.sort(function(a, b) { return a.position - b.position })
+  return rows
+}
+
+// The classification as the normalized Game the rest of the plugin renders.
+// It is an event, like a grand prix or a golf tournament: a field with an
+// order, not two sides with a score.
+function toGame(slug, entry, rows, nowMs) {
+  var meta = championship(slug)
+  if (!meta || !entry) return null
+
+  var leaders = []
+  for (var i = 0; i < rows.length && i < 3; i++) {
+    var row = rows[i]
+    var label = (row.number !== "" ? "#" + row.number + " " : "") + row.team
+    // The winner is described by what they won — the class. Everyone else is
+    // described by how far back they were, which is the thing that differs;
+    // repeating "HYPERCAR" down the column says nothing.
+    var gap = row.gap === "-" ? "" : row.gap
+    var detail = i === 0 ? (row.cls !== "" ? row.cls : row.laps)
+                         : (gap !== "" ? gap : (row.cls !== "" ? row.cls : row.laps))
+    leaders.push({ name: label, detail: detail, cls: row.cls, winner: i === 0, order: row.position })
+  }
+
+  var title = entry.event !== "" ? entry.event : meta.name
+  var startMs = stampToMs(entry.stamp)
+
+  return {
+    isEvent: true,
+    leaders: leaders,
+    id: slug + ":" + entry.stamp + ":" + entry.hour,
+    eventId: entry.stamp,
+    provider: "endurance",
+    league: slug,
+    sport: "racing",
+    name: title,
+    startUtc: startMs,
+    // Always a finished session. This reads results, never live timing.
+    state: "FINAL",
+    rawStatus: "Final",
+    statusDetail: entry.session,
+    delayed: false,
+    period: null,
+    clock: "",
+    home: emptyside(), away: emptyside(),
+    situation: null,
+    venue: "",
+    sessionLabel: prettySession(entry),
+    detailUrl: meta.base + entry.href,
+    updatedAt: nowMs || 0,
+    entries: rows
+  }
+}
+
+function emptyside() {
+  return { abbr: "", name: "", fullName: "", id: "", score: null, color: "", altColor: "",
+           logo: "", record: "", lines: [], winner: false }
+}
+
+function prettySession(entry) {
+  var name = String(entry.session || "").replace(/_/g, " ").trim()
+  if (entry.hour > 0) name += " · after " + entry.hour + "h"
+  return name
+}
+
+// "202607121130" -> epoch ms, read as local time. The files carry no timezone
+// and the circuit's own clock is what the folder name means.
+function stampToMs(stamp) {
+  var raw = String(stamp || "")
+  if (!/^\d{12}$/.test(raw)) return 0
+  var date = new Date(
+    parseInt(raw.slice(0, 4), 10),
+    parseInt(raw.slice(4, 6), 10) - 1,
+    parseInt(raw.slice(6, 8), 10),
+    parseInt(raw.slice(8, 10), 10),
+    parseInt(raw.slice(10, 12), 10))
+  var ms = date.getTime()
+  return isFinite(ms) ? ms : 0
+}
+
+if (typeof module !== "undefined") {
+  module.exports = {
+    CHAMPIONSHIPS: CHAMPIONSHIPS,
+    championship: championship, isEnduranceLeague: isEnduranceLeague,
+    indexUrl: indexUrl, parseIndex: parseIndex, pickLatest: pickLatest,
+    classificationUrl: classificationUrl, parseClassification: parseClassification,
+    toGame: toGame, cleanEventName: cleanEventName, stampToMs: stampToMs,
+    scoreSession: scoreSession, prettySession: prettySession
+  }
+}

@@ -4,6 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import "Leagues.js" as Leagues
 import "Providers.js" as Providers
+import "Endurance.js" as Endurance
 import "Model.js" as Model
 
 // Everything stateful: which leagues to poll, the fetch pool, the adaptive
@@ -362,7 +363,71 @@ Item {
   // Walk the provider chain: if the first provider fails, fall through to the
   // next rather than leaving the league blank. Only the last failure is
   // reported, because an ESPN hiccup that statsapi covered is not news.
+  // Sports car racing takes two hops: the results index names the current
+  // event and its sessions, and the classification itself is a separate CSV.
+  // Everything else is one request, so this sits beside the normal path rather
+  // than complicating it.
+  function fetchEndurance(league, forBrowse) {
+    // Results, not live timing — so this is fetched on the slow cadence and
+    // only ever for today's set. Browsing to another day cannot change a
+    // finished classification.
+    if (forBrowse) { finishLeague(); return }
+
+    enqueue({
+      url: Endurance.indexUrl(league),
+      etagPath: root.etagPathFor("endurance-index-" + league),
+      done: function(exitCode, body, error) {
+        if (exitCode !== 0) {
+          root.lastError = Leagues.displayName(league) + ": " + (error || "curl exited " + exitCode)
+          finishLeague()
+          return
+        }
+        // A 304: the index has not changed, so neither has the session it
+        // points at. Keep what we have.
+        if (String(body).trim() === "" && root.gamesByLeague[league] !== undefined) {
+          finishLeague()
+          return
+        }
+
+        var session = Endurance.pickLatest(Endurance.parseIndex(body, league))
+        if (!session) {
+          root.lastError = Leagues.displayName(league) + ": no classification published"
+          finishLeague()
+          return
+        }
+
+        var csvUrl = Endurance.classificationUrl(league, session)
+        if (csvUrl === "") { finishLeague(); return }
+
+        enqueue({
+          url: csvUrl,
+          etagPath: root.etagPathFor("endurance-csv-" + league),
+          done: function(csvExit, csvBody, csvError) {
+            if (csvExit !== 0) {
+              root.lastError = Leagues.displayName(league) + ": " + (csvError || "curl exited " + csvExit)
+              finishLeague()
+              return
+            }
+            if (String(csvBody).trim() === "" && root.gamesByLeague[league] !== undefined) {
+              finishLeague()
+              return
+            }
+
+            var rows = Endurance.parseClassification(csvBody)
+            var game = Endurance.toGame(league, session, rows, Date.now())
+            var next = {}
+            for (var key in root.gamesByLeague) next[key] = root.gamesByLeague[key]
+            next[league] = game ? [game] : []
+            root.gamesByLeague = next
+            finishLeague()
+          }
+        })
+      }
+    })
+  }
+
   function fetchLeagueVia(league, date, chain, index, forBrowse) {
+    if (chain.length > 0 && chain[0] === "endurance") { fetchEndurance(league, forBrowse); return }
     if (index >= chain.length) {
       root.lastError = Leagues.displayName(league) + ": no provider available"
       finishLeague()

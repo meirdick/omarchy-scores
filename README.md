@@ -228,9 +228,9 @@ Racing, golf, tennis and MMA are events with a field rather than two-sided
 games, so they render as the event plus the top of the leaderboard — "FedEx St.
 Jude Championship · S. Scheffler −17" — instead of a scoreline.
 
-**Endurance racing is not here.** ESPN carries exactly five racing series (F1,
-IndyCar and three NASCAR) and none of the sports car championships, so there is
-no Le Mans, WEC, ELMS or IMSA. See [Endurance racing](#endurance-racing).
+Endurance racing — the WEC (and so Le Mans), the European Le Mans Series and
+IMSA — comes from a different source, because ESPN carries no sports car
+racing at all. See [Endurance racing](#endurance-racing).
 
 Anything else ESPN carries works too, without waiting for a release: a
 `sport/league` path is passed through verbatim, and a bare `ned.1`-shaped slug
@@ -243,27 +243,40 @@ omarchy bar set meirdick.scores followedLeagues "mlb, eng.1, ned.1, rugby/270557
 
 ## Endurance racing
 
-There is no free JSON API for the WEC, Le Mans, ELMS or IMSA. What exists:
+`wec`, `elms` and `imsa` cover the FIA World Endurance Championship — which is
+where Le Mans lives — the European Le Mans Series, and IMSA. Follow them like
+any other league:
 
-- **ESPN** publishes five racing series and none of them are sports cars.
-- **TheSportsDB**'s free key now answers `all_leagues` with five soccer leagues
-  and nothing else, so it is no longer a metadata fallback either.
-- **Al Kamel Systems** times all four championships and publishes the official
-  classifications as semicolon-delimited CSV — position, number, lap, gap,
-  team, class, car and every driver — at `fiawec.alkamelsystems.com`,
-  `imsa.alkamelsystems.com` and `elms.alkamelsystems.com`. That is real,
-  official, free data.
+```bash
+omarchy-shell meirdick.scores followLeague wec
+```
 
-The catch is that Al Kamel's live timing is a Meteor application talking DDP
-over a websocket; the plausible-looking JSON paths all return the app shell,
-not data. Directory listing is refused, so the current event's folder has to be
-scraped out of the results page. So a working integration would give
-session-level classifications — updated when a session ends — rather than live
-positions, and would rest on HTML scraping rather than a documented API.
+**These are results, not live timing, and that is deliberate.** No free JSON
+API exists for sports car racing: ESPN carries five racing series and none of
+them are sports cars, and TheSportsDB's free key now answers with five soccer
+leagues and nothing else. What does exist is Al Kamel Systems, who time all
+three championships and publish the official classification of every session as
+CSV. This reads those, so you get the last completed session — after Le Mans,
+the Le Mans result.
 
-That is a different reliability class from the rest of this plugin, so it is
-not shipped. The pieces are proven and the note is here so nobody has to
-rediscover them.
+Al Kamel's live timing is a Meteor application speaking DDP over a websocket.
+Every plausible JSON path returns the application shell rather than data, so
+live positions would mean reverse-engineering a private protocol that can
+change without warning. A finished race read from the official classification
+is worth more than a live feed that breaks mid-season.
+
+Two things worth knowing if you touch this code:
+
+- The columns differ by championship *and* by session. A WEC race publishes
+  `POSITION;NUMBER;TEAM;DRIVER_1..4;VEHICLE`, a WEC practice publishes
+  `POS;NUMBER;LAP;TIME;…`, and IMSA publishes
+  `POSITION;NUMBER;STATUS;LAPS;TOTAL_TIME;GAP_FIRST;…`. The parser reads by
+  column name for that reason. The files are UTF-8 with a BOM, which otherwise
+  becomes part of the first column name and makes every lookup miss.
+- A WEC race is published as one classification per hour, so the last hour is
+  the finishing order. `results.imsa.com` answers every file with a 302 whose
+  `Location` is missing the slash between host and path, so the corrected host
+  is requested directly.
 
 ## Where the data comes from
 
@@ -371,6 +384,7 @@ Service.qml      polling, the fetch pool, diffing, notifications
 Providers.js     ESPN / MLB / NHL adapters -> one normalized Game
 Model.js         formatting, sorting, row building, the diff
 Leagues.js       canonical slug <-> each provider's own
+Endurance.js     Al Kamel classification CSVs for the WEC, ELMS and IMSA
 Indicators.qml   live / upcoming / final / delayed marks
 TeamCrest.qml    club badge, with a monogram when there is no logo
 ScoresMark.qml   the plugin's own mark, a pitch drawn from primitives
@@ -383,6 +397,7 @@ run under plain `node` with no compositor:
 node test/providers.test.js    # parsing, across five leagues and both summary shapes
 node test/fallbacks.test.js    # MLB and NHL fallbacks, cross-checked against ESPN
 node test/model.test.js        # formatting, diffing, pacing, row building
+node test/endurance.test.js    # index parsing and classification CSVs
 ```
 
 `fixtures/` holds real captured responses covering scheduled, live, delayed and
