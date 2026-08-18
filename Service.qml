@@ -116,8 +116,46 @@ Item {
     return fallback
   }
 
-  readonly property var follows: Model.normalizeFollows(setting("followedTeams", ""))
-  readonly property var followedLeagues: Model.normalizeLeagues(setting("followedLeagues", ""))
+  // Writes go out through `omarchy bar set`, which is a whole round trip:
+  // spawn, read shell.json, edit, write, file watcher, re-parse. Following two
+  // things inside that window made the second write compute its new list from
+  // the value before the first — so three quick follows kept two.
+  //
+  // These hold what was just asked for until the file agrees. null means
+  // nothing pending, which is distinct from "" meaning follow nothing.
+  property var pendingTeams: null
+  property var pendingLeagues: null
+
+  readonly property var follows: Model.normalizeFollows(
+    pendingTeams !== null ? pendingTeams : setting("followedTeams", ""))
+  readonly property var followedLeagues: Model.normalizeLeagues(
+    pendingLeagues !== null ? pendingLeagues : setting("followedLeagues", ""))
+
+  // Drop the optimistic value once the file says the same thing.
+  function settlePending() {
+    if (pendingTeams !== null &&
+        Model.normalizeFollows(setting("followedTeams", "")).join(",") ===
+        Model.normalizeFollows(pendingTeams).join(","))
+      pendingTeams = null
+    if (pendingLeagues !== null &&
+        Model.normalizeLeagues(setting("followedLeagues", "")).join(",") ===
+        Model.normalizeLeagues(pendingLeagues).join(","))
+      pendingLeagues = null
+  }
+
+  onFileSettingsChanged: settlePending()
+
+  // If a write never lands the optimistic value would stick forever, showing a
+  // follow that does not exist. Give up after a few seconds and believe the
+  // file again.
+  Timer {
+    id: pendingGuard
+    interval: 8000
+    onTriggered: {
+      root.pendingTeams = null
+      root.pendingLeagues = null
+    }
+  }
   readonly property int livePollSec: intSetting("livePollSec", 25, 10, 300)
   readonly property int idlePollSec: intSetting("idlePollSec", 900, 60, 7200)
   readonly property string barFormat: String(setting("barFormat", "full"))
@@ -544,6 +582,10 @@ Item {
   // and nothing says so — which is exactly how this lost its only team during
   // development.
   function writeSetting(key, value) {
+    // Believe it locally straight away; the file catches up.
+    if (key === "followedTeams") root.pendingTeams = value
+    else if (key === "followedLeagues") root.pendingLeagues = value
+    pendingGuard.restart()
     // No --json: these are plain comma-separated strings, and --json makes
     // omarchy-bar try to parse "mlb:TB" as JSON and write nothing at all.
     Quickshell.execDetached(["omarchy", "bar", "set", root.moduleId, key, value])
@@ -695,6 +737,7 @@ Item {
       browsingLeague: root.browsingLeague,
       providerChain: root.providerChain,
       espnHost: root.espnHost === "" ? Providers.ESPN_HOST : root.espnHost,
+      pending: { teams: root.pendingTeams, leagues: root.pendingLeagues },
       settingsSource: {
         injected: root.settings && root.settings.followedTeams !== undefined
           ? String(root.settings.followedTeams) : null,

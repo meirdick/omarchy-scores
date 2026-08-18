@@ -151,6 +151,58 @@ function espnSituation(situation, sport) {
   return out
 }
 
+// The standings of an event, best first. Several competitions can hang off one
+// event — a grand prix weekend is practice, qualifying and the race; a fight
+// card is one competition per bout — so the one with a field is the one worth
+// reading, and the last of those is the session or bout that matters most.
+function espnEventLeaders(event) {
+  var competitions = Array.isArray(event.competitions) ? event.competitions : []
+  var chosen = null
+  for (var i = 0; i < competitions.length; i++) {
+    var entrants = Array.isArray(competitions[i].competitors) ? competitions[i].competitors : []
+    if (entrants.length > 0) chosen = competitions[i]
+  }
+  if (!chosen) return []
+
+  var entrants = chosen.competitors.slice()
+  entrants.sort(function(a, b) {
+    var ao = a.order === undefined || a.order === null ? 999 : a.order
+    var bo = b.order === undefined || b.order === null ? 999 : b.order
+    return ao - bo
+  })
+
+  var out = []
+  for (var j = 0; j < entrants.length && j < 3; j++) {
+    var entrant = entrants[j]
+    var athlete = entrant.athlete || {}
+    var team = entrant.team || {}
+    var name = String(athlete.shortName || athlete.displayName || team.displayName || team.abbreviation || "")
+    if (name === "") continue
+    out.push({
+      name: name,
+      // Golf gives a score to par, racing a time or a gap; either way the
+      // provider has already formatted it for its own sport.
+      detail: String(entrant.score !== undefined && entrant.score !== null ? entrant.score
+                   : (entrant.stats && entrant.stats[0] ? entrant.stats[0].displayValue : "")),
+      winner: entrant.winner === true,
+      order: entrant.order === undefined ? j + 1 : entrant.order
+    })
+  }
+  return out
+}
+
+// Which session or bout the leaders came from, for the row's subtitle.
+function espnEventDetail(event) {
+  var competitions = Array.isArray(event.competitions) ? event.competitions : []
+  var label = ""
+  for (var i = 0; i < competitions.length; i++) {
+    var entrants = Array.isArray(competitions[i].competitors) ? competitions[i].competitors : []
+    if (entrants.length > 0 && competitions[i].type)
+      label = String(competitions[i].type.text || competitions[i].type.abbreviation || "")
+  }
+  return label
+}
+
 function espnDetailUrl(event) {
   var links = Array.isArray(event && event.links) ? event.links : []
   for (var i = 0; i < links.length; i++) {
@@ -179,7 +231,16 @@ function espnGame(event, league, sport, nowMs) {
   var type = status.type || {}
   var startMs = Date.parse(String(event.date || ""))
 
+  // Racing, golf, tennis and MMA have no home and away side: an event is a
+  // field of entrants, and ESPN puts them in `competitors` with an `order`
+  // instead of a `homeAway`. Rendering those through the two-team path
+  // produced rows reading "? @ ?".
+  var isEvent = home.abbr === "" && away.abbr === ""
+  var leaders = isEvent ? espnEventLeaders(event) : []
+
   return {
+    isEvent: isEvent,
+    leaders: leaders,
     id: "espn:" + String(event.id || ""),
     eventId: String(event.id || ""),
     provider: "espn",
@@ -197,6 +258,7 @@ function espnGame(event, league, sport, nowMs) {
     away: away,
     situation: espnSituation(competition.situation, sport),
     venue: competition.venue && competition.venue.fullName ? String(competition.venue.fullName) : "",
+    sessionLabel: isEvent ? espnEventDetail(event) : "",
     detailUrl: espnDetailUrl(event),
     updatedAt: nowMs || 0
   }
@@ -482,6 +544,7 @@ var mlb = {
           : String(game.status && game.status.detailedState || "")
 
         games.push({
+          isEvent: false, leaders: [], sessionLabel: "",
           id: "mlb:" + String(game.gamePk || ""),
           eventId: String(game.gamePk || ""),
           provider: "mlb",
@@ -566,6 +629,7 @@ var nhl = {
       var clock = String(game.clock && game.clock.timeRemaining || "")
 
       games.push({
+        isEvent: false, leaders: [], sessionLabel: "",
         id: "nhl:" + String(game.id || ""),
         eventId: String(game.id || ""),
         provider: "nhl",

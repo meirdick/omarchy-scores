@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "meirdick.scores",
   "name": "Scores",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "author": "meirdick",
   "license": "MIT",
   "description": "Live sports scores in the Omarchy bar: follow teams across the US majors, college and world soccer, with a keyboard-driven scoreboard, standings and optional alerts.",

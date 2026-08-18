@@ -221,8 +221,16 @@ watchdog after 45 seconds rather than wedging its slot.
 ## Leagues
 
 NFL, NCAA football, NBA, WNBA, NCAA basketball, MLB, NHL, the top five European
-soccer leagues, Champions League, Europa League, MLS, both World Cups, UFC, F1,
-PGA and ATP/WTA are named and browsable.
+soccer leagues, Champions League, Europa League, MLS, both World Cups, F1,
+IndyCar, all three NASCAR series, UFC, PGA and ATP/WTA are named and browsable.
+
+Racing, golf, tennis and MMA are events with a field rather than two-sided
+games, so they render as the event plus the top of the leaderboard — "FedEx St.
+Jude Championship · S. Scheffler −17" — instead of a scoreline.
+
+**Endurance racing is not here.** ESPN carries exactly five racing series (F1,
+IndyCar and three NASCAR) and none of the sports car championships, so there is
+no Le Mans, WEC, ELMS or IMSA. See [Endurance racing](#endurance-racing).
 
 Anything else ESPN carries works too, without waiting for a release: a
 `sport/league` path is passed through verbatim, and a bare `ned.1`-shaped slug
@@ -232,6 +240,30 @@ publishes over 200 soccer competitions alone.
 ```bash
 omarchy bar set meirdick.scores followedLeagues "mlb, eng.1, ned.1, rugby/270557"
 ```
+
+## Endurance racing
+
+There is no free JSON API for the WEC, Le Mans, ELMS or IMSA. What exists:
+
+- **ESPN** publishes five racing series and none of them are sports cars.
+- **TheSportsDB**'s free key now answers `all_leagues` with five soccer leagues
+  and nothing else, so it is no longer a metadata fallback either.
+- **Al Kamel Systems** times all four championships and publishes the official
+  classifications as semicolon-delimited CSV — position, number, lap, gap,
+  team, class, car and every driver — at `fiawec.alkamelsystems.com`,
+  `imsa.alkamelsystems.com` and `elms.alkamelsystems.com`. That is real,
+  official, free data.
+
+The catch is that Al Kamel's live timing is a Meteor application talking DDP
+over a websocket; the plausible-looking JSON paths all return the app shell,
+not data. Directory listing is refused, so the current event's folder has to be
+scraped out of the results page. So a working integration would give
+session-level classifications — updated when a session ends — rather than live
+positions, and would rest on HTML scraping rather than a documented API.
+
+That is a different reliability class from the rest of this plugin, so it is
+not shipped. The pieces are proven and the note is here so nobody has to
+rediscover them.
 
 ## Where the data comes from
 

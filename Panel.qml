@@ -144,7 +144,7 @@ Panel {
     // was just wrong.
     var live = 0, total = 0
     for (var i = 0; i < rows.length; i++) {
-      if (rows[i].kind !== "game") continue
+      if (!Model.isFixtureRow(rows[i])) continue
       total++
       if (rows[i].game.state === "LIVE") live++
     }
@@ -682,6 +682,7 @@ Panel {
             sourceComponent: modelData.kind === "section" ? sectionComponent
               : modelData.kind === "note" ? noteComponent
               : modelData.kind === "game" ? gameComponent
+              : modelData.kind === "event" ? eventComponent
               : modelData.kind === "league" ? leagueComponent
               : modelData.kind === "standing" ? standingComponent
               : modelData.kind === "play" ? playComponent
@@ -1245,6 +1246,146 @@ Panel {
           color: row && String(row.hint || "").indexOf("today") >= 0 ? root.accent : root.fainter
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
+        }
+      }
+    }
+  }
+
+  // Racing, golf, tennis and MMA: one event with a field, not two sides. The
+  // event is the headline and the top of the leaderboard is the score.
+  Component {
+    id: eventComponent
+    RowBase {
+      id: eventRow
+      implicitHeight: eventBody.implicitHeight + Style.space(20)
+
+      readonly property var game: row ? row.game : null
+      readonly property string token: game ? Model.stateToken(game) : "none"
+
+      Rectangle {
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: Style.space(12)
+        anchors.rightMargin: Style.space(8)
+        height: 1
+        visible: row && row.lastInGroup !== true
+        color: root.divider
+      }
+
+      Item {
+        id: eventBody
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        anchors.leftMargin: Style.space(12)
+        anchors.rightMargin: Style.space(8)
+        implicitHeight: eventColumn.implicitHeight
+
+        readonly property real statusWidth: Style.space(104)
+
+        Column {
+          id: eventColumn
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.rightMargin: eventBody.statusWidth
+          spacing: Style.space(4)
+
+          Text {
+            width: parent.width
+            text: eventRow.game ? eventRow.game.name : ""
+            elide: Text.ElideRight
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+          }
+
+          Text {
+            width: parent.width
+            visible: text !== ""
+            elide: Text.ElideRight
+            text: {
+              if (!eventRow.game) return ""
+              var parts = []
+              if (root.route === "") parts.push(Leagues.displayName(eventRow.game.league))
+              if (eventRow.game.sessionLabel !== "") parts.push(eventRow.game.sessionLabel)
+              if (eventRow.game.venue !== "") parts.push(eventRow.game.venue)
+              return parts.join("   ·   ")
+            }
+            color: root.fainter
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          // The top of the field. Absent before an event starts, which is the
+          // honest thing to show rather than a row of dashes.
+          Repeater {
+            model: eventRow.game ? eventRow.game.leaders : []
+            Item {
+              required property var modelData
+              required property int index
+              width: eventColumn.width
+              implicitHeight: entrantName.implicitHeight + Style.space(2)
+
+              Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(18)
+                text: String(modelData.order)
+                color: root.fainter
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+              Text {
+                id: entrantName
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(18)
+                anchors.right: entrantDetail.left
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                text: modelData.name
+                elide: Text.ElideRight
+                color: index === 0 ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: index === 0
+              }
+              Text {
+                id: entrantDetail
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                text: String(modelData.detail || "")
+                color: index === 0 ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: index === 0
+              }
+            }
+          }
+        }
+
+        Row {
+          anchors.right: parent.right
+          anchors.top: parent.top
+          spacing: Style.space(6)
+
+          Indicators {
+            anchors.verticalCenter: parent.verticalCenter
+            token: eventRow.token
+            foreground: root.foreground
+            accent: root.accent
+            urgent: root.urgent
+            size: Style.space(7)
+            animate: root.opened
+          }
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            text: row ? row.status : ""
+            color: eventRow.token === "live" ? root.accent : root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: eventRow.token === "live"
+          }
         }
       }
     }

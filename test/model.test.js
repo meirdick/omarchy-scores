@@ -149,7 +149,13 @@ var empty = M.buildRows({ route: "", games: [], follows: [], now: now })
 check("empty state explains itself", empty.some(function(r) { return r.kind === "note" }), JSON.stringify(empty.map(function(r){return r.kind})))
 
 var leagueList = M.buildRows({ route: "leagues", games: [], follows: [], now: now, leagueCounts: { mlb: 11 } })
-check("league list built", leagueList.filter(function(r) { return r.kind === "league" }).length === 20)
+// Count the catalogue rather than hardcoding a number that changes whenever a
+// series is added.
+eq("every catalogued league is listed",
+   leagueList.filter(function(r) { return r.kind === "league" }).length,
+   L.browseList().length)
+check("racing series are among them",
+      leagueList.some(function(r) { return r.kind === "league" && r.league === "indycar" }))
 
 var detail = M.buildRows({ route: "game:" + live.id, games: mlb, follows: follows, now: now,
   summary: { scoringPlays: [{text:"HR", teamAbbr:live.home.abbr, home:1, away:0}], leaders: [] } })
@@ -365,6 +371,30 @@ mlb.forEach(function(g) {
 })
 console.log("  clubs on today's slate with no readable colour:", invisible.length ? invisible.join(", ") : "none")
 eq("every club gets a readable colour", invisible.length, 0)
+
+console.log("\n=== event sports are not two-sided ===")
+var EVENTS = { pga: "pga", ufc: "ufc", f1: "f1" }
+Object.keys(EVENTS).forEach(function(slug) {
+  var raw
+  try { raw = fs.readFileSync("/tmp/sweepdata/" + slug + ".json", "utf8") } catch (e) { return }
+  var games = P.espn.parseScoreboard(raw, slug, now).games
+  if (games.length === 0) return
+  var g = games[0]
+  console.log("  " + slug.padEnd(4) + " " + (g.isEvent ? "event" : "TWO-SIDED") +
+              "  bar: " + M.barTextFor(g, "full", now))
+  check(slug + " is flagged as an event", g.isEvent === true)
+  // The bug this guards: a two-team render of a field of entrants read "? @ ?".
+  check(slug + " bar text names the event", M.barTextFor(g, "full", now).indexOf("?") < 0,
+        M.barTextFor(g, "full", now))
+  var rows = M.buildRows({ route: "", games: games, follows: [], followedLeagues: [slug], now: now })
+  check(slug + " renders as an event row", rows.some(function(r) { return r.kind === "event" }))
+  check(slug + " is counted as a fixture", rows.filter(M.isFixtureRow).length > 0)
+})
+// Team sports must be untouched by all of that.
+check("team sports stay two-sided", mlb.every(function(g) { return g.isEvent === false }))
+check("and still render as game rows",
+      M.buildRows({ route: "", games: mlb, follows: [], followedLeagues: ["mlb"], now: now })
+        .some(function(r) { return r.kind === "game" }))
 
 console.log(failures === 0 ? "\nOK — all assertions passed" : "\n" + failures + " FAILURES")
 process.exit(failures === 0 ? 0 : 1)

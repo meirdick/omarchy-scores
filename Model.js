@@ -240,6 +240,22 @@ function basesLabel(bases) {
 // status token. Anything that does not fit that shape belongs in the panel.
 function barTextFor(game, format, nowMs, formatTime) {
   if (!game) return ""
+
+  // An event has no two sides to put a score between. Its name is the headline
+  // and the leader, where there is one, is the score.
+  if (game.isEvent) {
+    var title = String(game.name || "")
+    if (format === "compact") return title
+    if (game.state === "PRE") {
+      var until = game.startUtc ? countdown(game.startUtc - nowMs) : ""
+      return until ? (title + " · " + until) : title
+    }
+    var front = game.leaders && game.leaders.length > 0 ? game.leaders[0] : null
+    var lead = front ? (front.name + (front.detail ? " " + front.detail : "")) : ""
+    var state = statusLabel(game, nowMs, formatTime)
+    return [title, lead, state].filter(nonEmpty).join("  ·  ")
+  }
+
   var away = game.away, home = game.home
 
   if (game.state === "PRE") {
@@ -492,7 +508,7 @@ function note(text, key) {
 
 function gameRow(game, set, nowMs, formatTime, leagues) {
   return {
-    kind: "game", key: game.id, selectable: true, game: game,
+    kind: game.isEvent ? "event" : "game", key: game.id, selectable: true, game: game,
     followed: isFollowedGame(set, game, leagues),
     followedByTeam: isFollowedByTeam(set, game),
     status: statusLabel(game, nowMs, formatTime),
@@ -510,6 +526,11 @@ function markGroups(rows) {
     rows[i].lastInGroup = !next || next.kind !== rows[i].kind
   }
   return rows
+}
+
+// "game" and "event" are both fixtures; anything counting the card wants both.
+function isFixtureRow(row) {
+  return row && (row.kind === "game" || row.kind === "event")
 }
 
 function buildRows(state) {
@@ -1044,7 +1065,7 @@ if (typeof module !== "undefined") {
     diffGames: diffGames, isCloseGame: isCloseGame, notificationFor: notificationFor,
     pollIntervalSec: pollIntervalSec,
     buildRows: buildRows, firstSelectable: firstSelectable, relativeTime: relativeTime,
-    matchesFilter: matchesFilter, markGroups: markGroups,
+    matchesFilter: matchesFilter, markGroups: markGroups, isFixtureRow: isFixtureRow,
     standingRowsFor: standingRowsFor,
     widgetSettingsFrom: widgetSettingsFrom,
     luminance: luminance, contrastRatio: contrastRatio, teamAccent: teamAccent,

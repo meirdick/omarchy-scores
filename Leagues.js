@@ -30,9 +30,16 @@ var CATALOG = {
   "wc":      { name: "World Cup",        group: "Soccer", espn: "soccer/fifa.world" , logo: "https://a.espncdn.com/i/leaguelogos/soccer/500/4.png" },
   "wwc":     { name: "Women's World Cup", group: "Soccer", espn: "soccer/fifa.wwc" , logo: "https://a.espncdn.com/i/leaguelogos/soccer/500/6.png" },
 
+  // ---- Racing. ESPN carries these five and no more: there is no WEC, IMSA or
+  // Le Mans here, which is why endurance racing needs its own source.
+  "f1":       { name: "Formula 1",    group: "Racing", espn: "racing/f1", individual: true, logo: "https://a.espncdn.com/i/teamlogos/leagues/500/f1.png" },
+  "indycar":  { name: "IndyCar",      group: "Racing", espn: "racing/irl", individual: true },
+  "nascar":   { name: "NASCAR Cup",   group: "Racing", espn: "racing/nascar-premier", individual: true },
+  "nascar-2": { name: "NASCAR Xfinity", group: "Racing", espn: "racing/nascar-secondary", individual: true },
+  "nascar-3": { name: "NASCAR Trucks", group: "Racing", espn: "racing/nascar-truck", individual: true },
+
   // ---- Individual sports. No teams to follow, so these are browse-only.
   "ufc": { name: "UFC", group: "Other", espn: "mma/ufc", individual: true },
-  "f1":  { name: "F1",  group: "Other", espn: "racing/f1", individual: true },
   "pga": { name: "PGA", group: "Other", espn: "golf/pga", individual: true },
   "atp": { name: "ATP", group: "Other", espn: "tennis/atp", individual: true },
   "wta": { name: "WTA", group: "Other", espn: "tennis/wta", individual: true }
@@ -44,7 +51,8 @@ var CATALOG = {
 var BROWSE_ORDER = [
   "nfl", "ncaaf", "nba", "wnba", "ncaam", "mlb", "nhl",
   "eng.1", "esp.1", "ger.1", "ita.1", "fra.1", "ucl", "uel", "mls", "wc",
-  "ufc", "f1", "pga", "atp"
+  "f1", "indycar", "nascar", "nascar-2", "nascar-3",
+  "ufc", "pga", "atp"
 ];
 
 // ESPN publishes ~216 soccer competitions and a comparable tail elsewhere.
