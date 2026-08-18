@@ -43,7 +43,68 @@ function isFollowedTeam(set, league, abbr) {
   return set[followKey(league, abbr)] === true
 }
 
-function isFollowedGame(set, game) {
+// Leagues are followed as bare canonical slugs, teams as "<league>:<ABBR>".
+// They are separate lists because they answer different questions: "I care
+// about this club" and "I care about this whole competition".
+function normalizeLeagues(value) {
+  var list = []
+  if (Array.isArray(value)) list = value
+  else if (typeof value === "string" && value.trim() !== "") list = value.split(/[\s,]+/)
+  var seen = {}, out = []
+  for (var i = 0; i < list.length; i++) {
+    var slug = String(list[i] || "").trim()
+    // A "league" carrying a colon is a team entry in the wrong setting.
+    if (slug === "" || slug.indexOf(":") >= 0) continue
+    if (!seen[slug]) { seen[slug] = true; out.push(slug) }
+  }
+  return out
+}
+
+function leagueSet(value) {
+  var set = {}
+  var list = normalizeLeagues(value)
+  for (var i = 0; i < list.length; i++) set[list[i]] = true
+  return set
+}
+
+function isFollowedLeague(leagues, slug) {
+  return !!leagues && leagues[String(slug)] === true
+}
+
+function addFollowLeague(value, slug) {
+  var list = normalizeLeagues(value)
+  if (list.indexOf(String(slug)) < 0) list.push(String(slug))
+  return list
+}
+
+function removeFollowLeague(value, slug) {
+  var list = normalizeLeagues(value)
+  var index = list.indexOf(String(slug))
+  if (index >= 0) list.splice(index, 1)
+  return list
+}
+
+function toggleFollowLeague(value, slug) {
+  var list = normalizeLeagues(value)
+  var index = list.indexOf(String(slug))
+  if (index >= 0) list.splice(index, 1)
+  else list.push(String(slug))
+  return list
+}
+
+// A game is yours if either club is, or if you follow the whole competition.
+function isFollowedGame(set, game, leagues) {
+  if (!game) return false
+  if (isFollowedLeague(leagues, game.league)) return true
+  return isFollowedTeam(set, game.league, game.home.abbr) ||
+         isFollowedTeam(set, game.league, game.away.abbr)
+}
+
+// Distinguishes the two reasons a game is yours. The bar uses this to prefer a
+// club you follow over a competition you follow: following the Premier League
+// should not mean ten matches fight over one bar slot while your own club is
+// playing.
+function isFollowedByTeam(set, game) {
   if (!game) return false
   return isFollowedTeam(set, game.league, game.home.abbr) ||
          isFollowedTeam(set, game.league, game.away.abbr)
@@ -55,6 +116,21 @@ function followedSide(set, game) {
   if (isFollowedTeam(set, game.league, game.home.abbr)) return "home"
   if (isFollowedTeam(set, game.league, game.away.abbr)) return "away"
   return null
+}
+
+function addFollow(value, league, abbr) {
+  var key = followKey(league, abbr)
+  var list = normalizeFollows(value)
+  if (list.indexOf(key) < 0) list.push(key)
+  return list
+}
+
+function removeFollow(value, league, abbr) {
+  var key = followKey(league, abbr)
+  var list = normalizeFollows(value)
+  var index = list.indexOf(key)
+  if (index >= 0) list.splice(index, 1)
+  return list
 }
 
 function toggleFollow(value, league, abbr) {
@@ -187,10 +263,22 @@ function fmtScore(value) { return (value === null || value === undefined) ? "0" 
 function barState(games, follows, nowMs, options) {
   var opts = options || {}
   var set = followSet(follows)
-  var followed = []
-  for (var i = 0; i < games.length; i++) if (isFollowedGame(set, games[i])) followed.push(games[i])
+  var leagues = leagueSet(opts.leagues)
+  var followed = [], ownClub = []
+  for (var i = 0; i < games.length; i++) {
+    if (!isFollowedGame(set, games[i], leagues)) continue
+    followed.push(games[i])
+    if (isFollowedByTeam(set, games[i])) ownClub.push(games[i])
+  }
 
-  var live = followed.filter(function(g) { return g.state === "LIVE" })
+  // Following a whole competition should not mean ten matches crowd out your
+  // own club. If any club game qualifies, the bar shows only those.
+  function preferOwn(list) {
+    var mine = list.filter(function(g) { return isFollowedByTeam(set, g) })
+    return mine.length > 0 ? mine : list
+  }
+
+  var live = preferOwn(followed.filter(function(g) { return g.state === "LIVE" }))
   if (live.length > 0) {
     live.sort(function(a, b) { return a.startUtc - b.startUtc })
     var index = live.length > 0 ? (Math.max(0, opts.rotateIndex || 0) % live.length) : 0
@@ -203,7 +291,7 @@ function barState(games, follows, nowMs, options) {
 
   // Nothing live: the next game the user cares about, so the widget is not
   // blank for the 80% of the week when nobody is playing.
-  var upcoming = followed.filter(function(g) { return g.state === "PRE" && g.startUtc > nowMs })
+  var upcoming = preferOwn(followed.filter(function(g) { return g.state === "PRE" && g.startUtc > nowMs }))
   upcoming.sort(function(a, b) { return a.startUtc - b.startUtc })
   if (upcoming.length > 0)
     return {
@@ -212,9 +300,9 @@ function barState(games, follows, nowMs, options) {
     }
 
   // A final that is still worth reading — the score you missed while away.
-  var finals = followed.filter(function(g) {
+  var finals = preferOwn(followed.filter(function(g) {
     return g.state === "FINAL" && (nowMs - g.startUtc) < (opts.finalWindowHours || 8) * HOUR
-  })
+  }))
   finals.sort(function(a, b) { return b.startUtc - a.startUtc })
   if (finals.length > 0)
     return {
@@ -254,11 +342,12 @@ function diffGames(previous, current, options) {
   var opts = options || {}
   if (opts.suppress) return []
   var set = followSet(opts.follows)
+  var leagues = leagueSet(opts.leagues)
   var events = []
 
   for (var i = 0; i < current.length; i++) {
     var game = current[i]
-    if (opts.followedOnly !== false && !isFollowedGame(set, game)) continue
+    if (opts.followedOnly !== false && !isFollowedGame(set, game, leagues)) continue
     var before = previous ? previous[game.id] : null
     if (!before) continue
 
@@ -370,10 +459,11 @@ function pollIntervalSec(games, follows, nowMs, options) {
   if (opts.panelOpen) return live
 
   var set = followSet(follows)
+  var leagues = leagueSet(opts.leagues)
   var anyLive = false, soonest = null
   for (var i = 0; i < games.length; i++) {
     var game = games[i]
-    var followed = isFollowedGame(set, game)
+    var followed = isFollowedGame(set, game, leagues)
     if (game.state === "LIVE" && (followed || opts.watchAll)) anyLive = true
     if (game.state === "PRE" && followed && game.startUtc > nowMs)
       if (soonest === null || game.startUtc < soonest) soonest = game.startUtc
@@ -397,10 +487,11 @@ function note(text, key) {
   return { kind: "note", key: "note:" + (key || text), selectable: false, text: text }
 }
 
-function gameRow(game, set, nowMs, formatTime) {
+function gameRow(game, set, nowMs, formatTime, leagues) {
   return {
     kind: "game", key: game.id, selectable: true, game: game,
-    followed: isFollowedGame(set, game),
+    followed: isFollowedGame(set, game, leagues),
+    followedByTeam: isFollowedByTeam(set, game),
     status: statusLabel(game, nowMs, formatTime),
     situation: situationLine(game),
     league: game.league
@@ -422,17 +513,18 @@ function buildRows(state) {
   var route = String(state.route || "")
   var nowMs = state.now || 0
   var set = followSet(state.follows)
+  var leagues = leagueSet(state.followedLeagues)
   var formatTime = state.formatTime
   var filter = String(state.filter || "").trim().toLowerCase()
   var games = Array.isArray(state.games) ? state.games : []
 
-  if (route.indexOf("game:") === 0) return markGroups(gameDetailRows(state, set, nowMs, formatTime))
-  if (route.indexOf("standings:") === 0) return markGroups(standingsRows(state))
-  if (route.indexOf("league:") === 0) return markGroups(leagueRows(state, set, nowMs, formatTime))
-  if (route === "leagues") return markGroups(leagueListRows(state))
-  if (route === "search") return markGroups(searchRows(state, set))
+  if (route.indexOf("game:") === 0) return markGroups(gameDetailRows(state, set, nowMs, formatTime, leagues))
+  if (route.indexOf("standings:") === 0) return markGroups(standingsRows(state, set))
+  if (route.indexOf("league:") === 0) return markGroups(leagueRows(state, set, nowMs, formatTime, leagues))
+  if (route === "leagues") return markGroups(leagueListRows(state, leagues))
+  if (route === "search") return markGroups(searchRows(state, set, leagues))
 
-  return markGroups(todayRows(state, set, nowMs, formatTime, filter, games))
+  return markGroups(todayRows(state, set, nowMs, formatTime, filter, games, leagues))
 }
 
 function matchesFilter(game, filter) {
@@ -442,11 +534,11 @@ function matchesFilter(game, filter) {
   return haystack.indexOf(filter) >= 0
 }
 
-function todayRows(state, set, nowMs, formatTime, filter, games) {
+function todayRows(state, set, nowMs, formatTime, filter, games, leagues) {
   var rows = []
   var visible = games.filter(function(g) { return matchesFilter(g, filter) })
-  var followed = visible.filter(function(g) { return isFollowedGame(set, g) })
-  var others = visible.filter(function(g) { return !isFollowedGame(set, g) })
+  var followed = visible.filter(function(g) { return isFollowedGame(set, g, leagues) })
+  var others = visible.filter(function(g) { return !isFollowedGame(set, g, leagues) })
 
   var followedLive = sortGames(followed.filter(function(g) { return g.state === "LIVE" }))
   var followedRest = sortGames(followed.filter(function(g) { return g.state !== "LIVE" }))
@@ -455,46 +547,59 @@ function todayRows(state, set, nowMs, formatTime, filter, games) {
 
   if (followedLive.length > 0) {
     rows.push(section("Live", String(followedLive.length)))
-    for (var i = 0; i < followedLive.length; i++) rows.push(gameRow(followedLive[i], set, nowMs, formatTime))
+    for (var i = 0; i < followedLive.length; i++) rows.push(gameRow(followedLive[i], set, nowMs, formatTime, leagues))
   }
   if (followedRest.length > 0) {
     rows.push(section("Your teams", String(followedRest.length)))
-    for (var j = 0; j < followedRest.length; j++) rows.push(gameRow(followedRest[j], set, nowMs, formatTime))
+    for (var j = 0; j < followedRest.length; j++) rows.push(gameRow(followedRest[j], set, nowMs, formatTime, leagues))
   }
   if (othersLive.length > 0) {
     rows.push(section("Live elsewhere", String(othersLive.length)))
-    for (var k = 0; k < othersLive.length; k++) rows.push(gameRow(othersLive[k], set, nowMs, formatTime))
+    for (var k = 0; k < othersLive.length; k++) rows.push(gameRow(othersLive[k], set, nowMs, formatTime, leagues))
   }
   if (state.showAll !== false && othersRest.length > 0) {
     rows.push(section("Also today", String(othersRest.length)))
-    for (var m = 0; m < othersRest.length; m++) rows.push(gameRow(othersRest[m], set, nowMs, formatTime))
+    for (var m = 0; m < othersRest.length; m++) rows.push(gameRow(othersRest[m], set, nowMs, formatTime, leagues))
   }
+
+  var nothingFollowed = normalizeFollows(state.follows).length === 0 &&
+                        normalizeLeagues(state.followedLeagues).length === 0
 
   if (rows.length === 0) {
     if (state.loading) rows.push(note("Loading…", "loading"))
     else if (filter !== "") rows.push(note("Nothing matches “" + state.filter + "”", "nomatch"))
-    else if (normalizeFollows(state.follows).length === 0)
-      rows.push(note("No teams followed yet — press / to search, f to follow", "nofollows"))
+    else if (nothingFollowed) rows.push(note("Nothing followed yet. Start here:", "nofollows"))
     else rows.push(note("No games scheduled", "nogames"))
   }
 
-  rows.push(section("Browse", ""))
-  rows.push({ kind: "action", key: "action:leagues", selectable: true, action: "leagues", label: "All leagues", hint: "" })
-  return rows
+  // Adding a team is a listed action, not only a keybind. A fresh install
+  // otherwise shows an empty card and no way forward unless you read the
+  // legend, and the legend is the first thing nobody reads.
+  var follow = [
+    section("Follow", ""),
+    { kind: "action", key: "action:search", selectable: true, action: "search",
+      label: "Add a team", hint: "/" },
+    { kind: "action", key: "action:leagues", selectable: true, action: "leagues",
+      label: "Add a league", hint: "L" }
+  ]
+
+  // Always last. On a fresh install the only row above them is the note that
+  // points at them, so they still read as the next step.
+  return rows.concat(follow)
 }
 
-function leagueRows(state, set, nowMs, formatTime) {
+function leagueRows(state, set, nowMs, formatTime, leagues) {
   var slug = String(state.route).slice("league:".length)
   var rows = []
   var games = sortGames((state.games || []).filter(function(g) { return g.league === slug }))
   if (games.length === 0) rows.push(note(state.loading ? "Loading…" : "No games scheduled", "empty"))
-  for (var i = 0; i < games.length; i++) rows.push(gameRow(games[i], set, nowMs, formatTime))
+  for (var i = 0; i < games.length; i++) rows.push(gameRow(games[i], set, nowMs, formatTime, leagues))
   rows.push({ kind: "action", key: "action:standings", selectable: true, action: "standings:" + slug,
               label: "Standings", hint: "" })
   return rows
 }
 
-function leagueListRows(state) {
+function leagueListRows(state, leagues) {
   var rows = []
   var list = Leagues ? Leagues.browseList() : []
   var lastGroup = ""
@@ -505,6 +610,7 @@ function leagueListRows(state) {
     rows.push({
       kind: "league", key: "league:" + league.id, selectable: true,
       league: league.id, label: league.name,
+      followed: isFollowedLeague(leagues, league.id),
       hint: counts[league.id] ? (counts[league.id] + " today") : ""
     })
   }
@@ -512,7 +618,7 @@ function leagueListRows(state) {
   return rows
 }
 
-function standingsRows(state) {
+function standingsRows(state, set) {
   var slug = String(state.route).slice("standings:".length)
   var rows = []
   var groups = state.standings || []
@@ -541,14 +647,14 @@ function recordLabel(entry) {
   return record
 }
 
-function gameDetailRows(state, set, nowMs, formatTime) {
+function gameDetailRows(state, set, nowMs, formatTime, leagues) {
   var id = String(state.route).slice("game:".length)
   var game = null
   var games = state.games || []
   for (var i = 0; i < games.length; i++) if (games[i].id === id) game = games[i]
   if (!game) return [note("Game no longer on the card", "gone")]
 
-  var rows = [gameRow(game, set, nowMs, formatTime)]
+  var rows = [gameRow(game, set, nowMs, formatTime, leagues)]
 
   if (game.home.lines.length > 0 || game.away.lines.length > 0)
     rows.push({ kind: "linescore", key: "linescore:" + game.id, selectable: false, game: game })
@@ -577,7 +683,7 @@ function gameDetailRows(state, set, nowMs, formatTime) {
   return rows
 }
 
-function searchRows(state, set) {
+function searchRows(state, set, leagues) {
   var filter = String(state.filter || "").trim().toLowerCase()
   // No heading: the hero already says "Follow a team" and repeats the hint.
   var rows = []
@@ -641,6 +747,36 @@ function relativeTime(ms, nowMs) {
   if (delta < HOUR) return Math.floor(delta / MINUTE) + "m ago"
   if (delta < DAY) return Math.floor(delta / HOUR) + "h ago"
   return Math.floor(delta / DAY) + "d ago"
+}
+
+// ------------------------------------------------------------- shell.json
+
+// This widget's own entry, pulled out of a whole shell.json. Every other key
+// in that file belongs to somebody else.
+//
+// Returns null rather than {} when the text cannot be used, so the caller can
+// tell "no entry" from "a half-written file I should ignore" and keep what it
+// already had.
+function widgetSettingsFrom(text, moduleId) {
+  var raw = String(text || "").trim()
+  if (raw === "") return null
+  var parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    // Caught mid-save by the file watcher. Not an error, just not readable yet.
+    return null
+  }
+  var layout = parsed && parsed.bar && parsed.bar.layout ? parsed.bar.layout : null
+  if (!layout) return ({})
+  var sections = ["left", "center", "right"]
+  for (var i = 0; i < sections.length; i++) {
+    var entries = layout[sections[i]]
+    if (!Array.isArray(entries)) continue
+    for (var j = 0; j < entries.length; j++)
+      if (entries[j] && entries[j].id === moduleId) return entries[j]
+  }
+  return ({})
 }
 
 // ------------------------------------------------------------- emphasis
@@ -711,7 +847,11 @@ if (typeof module !== "undefined") {
     useLeagues: useLeagues,
     followKey: followKey, normalizeFollows: normalizeFollows, followSet: followSet,
     isFollowedTeam: isFollowedTeam, isFollowedGame: isFollowedGame,
-    followedSide: followedSide, toggleFollow: toggleFollow,
+    isFollowedByTeam: isFollowedByTeam, followedSide: followedSide,
+    toggleFollow: toggleFollow, addFollow: addFollow, removeFollow: removeFollow,
+    normalizeLeagues: normalizeLeagues, leagueSet: leagueSet,
+    isFollowedLeague: isFollowedLeague, toggleFollowLeague: toggleFollowLeague,
+    addFollowLeague: addFollowLeague, removeFollowLeague: removeFollowLeague,
     clockTime: clockTime, sameDay: sameDay, countdown: countdown,
     statusLabel: statusLabel, situationLine: situationLine, basesLabel: basesLabel,
     barTextFor: barTextFor, barState: barState, fmtScore: fmtScore,
@@ -720,6 +860,7 @@ if (typeof module !== "undefined") {
     pollIntervalSec: pollIntervalSec,
     buildRows: buildRows, firstSelectable: firstSelectable, relativeTime: relativeTime,
     matchesFilter: matchesFilter, markGroups: markGroups,
+    widgetSettingsFrom: widgetSettingsFrom,
     leaderSide: leaderSide, winnerSide: winnerSide, stateToken: stateToken,
     activityKey: activityKey, progressFraction: progressFraction,
     regulationPeriods: regulationPeriods

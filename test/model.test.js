@@ -161,5 +161,62 @@ var search = M.buildRows({ route: "search", games: mlb, follows: follows, now: n
 console.log("  search kinds:", search.map(function(r) { return r.kind }).join(","))
 check("search finds by name", search.some(function(r) { return r.kind === "team" && r.abbr === "BOS" }))
 
+console.log("\n=== league following ===")
+var byLeague = M.barState(mlb, [], now, { leagues: ["mlb"] })
+console.log("  league-only follow :", byLeague.mode, "|", byLeague.text, "| count", byLeague.count)
+check("a followed league fills the bar", byLeague.mode === "live")
+check("a followed league offers every live game", byLeague.count > 1, "count=" + byLeague.count)
+
+var liveHome = mlb.filter(function(g) { return g.state === "LIVE" })[0].home.abbr
+var mixed = M.barState(mlb, ["mlb:" + liveHome], now, { leagues: ["mlb"] })
+console.log("  club beats league  :", mixed.text, "| count", mixed.count)
+eq("your club wins the bar slot", mixed.count, 1)
+check("and it is your club", mixed.game.home.abbr === liveHome || mixed.game.away.abbr === liveHome)
+
+var leagueRows = M.buildRows({ route: "", games: mlb, follows: [], followedLeagues: ["mlb"], now: now })
+check("league follow makes games yours", leagueRows.some(function(r) { return r.kind === "game" && r.followed }))
+check("but not by team", !leagueRows.some(function(r) { return r.kind === "game" && r.followedByTeam }))
+
+var list = M.buildRows({ route: "leagues", games: [], follows: [], followedLeagues: ["nfl"], now: now })
+var nfl = list.filter(function(r) { return r.kind === "league" && r.league === "nfl" })[0]
+check("followed league is marked in the list", nfl && nfl.followed === true)
+
+console.log("\n=== follow is not a toggle ===")
+eq("adding twice is idempotent", M.addFollow(M.addFollow([], "mlb", "BOS"), "mlb", "bos").length, 1)
+eq("adding a league twice is idempotent", M.addFollowLeague(M.addFollowLeague([], "nfl"), "nfl").length, 1)
+eq("removing what is absent is a no-op", M.removeFollow(["mlb:BOS"], "nfl", "NYJ").length, 1)
+eq("league list rejects team entries", M.normalizeLeagues(["mlb", "mlb:BOS"]).length, 1)
+
+console.log("\n=== follow actions are always offered ===")
+var fresh = M.buildRows({ route: "", games: [], follows: [], followedLeagues: [], now: now })
+check("fresh install offers add-a-team", fresh.some(function(r) { return r.action === "search" }))
+check("fresh install offers add-a-league", fresh.some(function(r) { return r.action === "leagues" }))
+var busy = M.buildRows({ route: "", games: mlb, follows: ["mlb:" + liveHome], followedLeagues: [], now: now })
+check("still offered once following", busy.some(function(r) { return r.action === "search" }))
+check("and they do not lead once there are scores", busy[0].kind === "section" && busy[0].title === "Live")
+
+console.log("\n=== shell.json extraction ===")
+var CONFIG = JSON.stringify({
+  version: 1,
+  bar: { layout: {
+    left: [{ id: "omarchy.workspaces" }],
+    center: [{ id: "omarchy.clock", format: "HH:mm" }],
+    right: [{ id: "omarchy.tray" },
+            { id: "meirdick.scores", followedTeams: "mlb:TB, mlb:BOS", livePollSec: 15 },
+            { id: "omarchy.power" }]
+  } }
+})
+var entry = M.widgetSettingsFrom(CONFIG, "meirdick.scores")
+console.log("  entry:", JSON.stringify(entry))
+check("finds our entry", entry && entry.id === "meirdick.scores")
+eq("reads a setting off it", entry.livePollSec, 15)
+eq("spaced list still parses to two", M.normalizeFollows(entry.followedTeams).length, 2)
+eq("a widget that is not listed yields no keys", Object.keys(M.widgetSettingsFrom(CONFIG, "someone.else")).length, 0)
+// null, not {} — the difference between "not there" and "cannot read it yet",
+// which is what stops a mid-save read from wiping the followed list.
+check("half-written JSON returns null", M.widgetSettingsFrom('{"bar":{"lay', "meirdick.scores") === null)
+check("empty returns null", M.widgetSettingsFrom("", "meirdick.scores") === null)
+eq("a config with no bar yields no keys", Object.keys(M.widgetSettingsFrom('{"version":1}', "meirdick.scores")).length, 0)
+
 console.log(failures === 0 ? "\nOK — all assertions passed" : "\n" + failures + " FAILURES")
 process.exit(failures === 0 ? 0 : 1)

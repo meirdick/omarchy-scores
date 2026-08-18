@@ -28,25 +28,51 @@ elsewhere on the system. It writes exactly two things: its own entry in
 `curl`. Nothing else, and no API key — see [Where the data comes
 from](#where-the-data-comes-from).
 
-## Follow a team
+## Follow teams and leagues
 
-Nothing is followed on a fresh install, so the widget starts as a dim icon.
-Two ways to fix that, both writing the same place:
+Nothing is followed on a fresh install, so the widget starts as a dim mark and
+the panel leads with **Add a team** and **Add a league**. Both are listed
+actions, not just keybinds.
+
+You can follow at two levels, and they are separate lists:
+
+- **A team** — `mlb:BOS`. Its games are yours wherever they appear.
+- **A league** — `eng.1`. Every game in the competition is yours.
 
 ```bash
-# From the panel: press / to search every team in every league, f to follow.
-# From the shell:
+# In the panel
+#   /  search every team in every league, then f to follow
+#   L  the league list, then f to follow the whole competition
+#   f  follow whatever is under the cursor
+#   x  unfollow it
+
+# From the shell
 omarchy-shell meirdick.scores follow mlb BOS
 omarchy-shell meirdick.scores unfollow mlb BOS
-# Or by hand, comma-separated league:ABBR pairs:
+omarchy-shell meirdick.scores followLeague eng.1
+omarchy-shell meirdick.scores unfollowLeague eng.1
+omarchy-shell meirdick.scores following        # what is followed, as JSON
+
+# By hand
 omarchy bar set meirdick.scores followedTeams "mlb:BOS, nfl:NYJ, eng.1:ARS"
+omarchy bar set meirdick.scores followedLeagues "nfl, eng.1"
 ```
+
+**`f` only ever adds and `x` only ever removes.** There is deliberately no
+single key that does both: a toggle removes a team the moment you press it
+twice or once by accident, and nothing on screen tells you a follow just
+disappeared. Pressing `f` on something you already follow says so and changes
+nothing.
+
+Following a league does not drown out your own clubs. If a club you follow is
+playing, the bar shows that game; the league's other games fill the bar only
+when none of your clubs are on. In the panel they all count as yours.
+
+Only leagues you follow, or that contain a team you follow, are polled. Opening
+a league you do not follow fetches it for as long as you are looking at it.
 
 There is one source of truth — the widget's entry in `shell.json` — so a
 keypress in the panel and a hand edit cannot disagree.
-
-Only leagues containing a team you follow are polled. Add `leagues` if you want
-to browse a competition you have no team in.
 
 ## What the bar shows
 
@@ -62,6 +88,12 @@ to browse a competition you have no team in.
 Click opens the panel, right-click forces a refresh, middle-click opens the
 current game on the web, scroll cycles between live games. `barFormat` narrows
 it to `compact` or `icon` for a busy bar.
+
+**The bar always shows today**, whatever day the panel is browsing. The widget
+is sized to its own text, so letting it follow the panel's date meant paging to
+tomorrow resized it and shoved every other widget in the bar sideways. Today's
+games are fetched and diffed on their own schedule; the browsed day is a
+separate set that only the panel reads.
 
 ## The panel
 
@@ -87,12 +119,13 @@ the corner of your eye means something actually happened.
 | `j` `k` | move |
 | `l` `enter` | open the game, the league, the standings |
 | `h` `esc` | back, then close |
-| `f` | follow or unfollow the team under the cursor |
+| `f` | follow the team or league under the cursor |
+| `x` | unfollow it |
 | `o` | open the game on the web |
 | `/` | search every team in every league |
 | `[` `]` | previous or next day |
 | `t` | back to today |
-| `L` | the league list |
+| `L` | the league list, where `f` follows a whole competition |
 | `r` | refresh now |
 | `g` `G` | top, bottom |
 | `tab` | switch to the next bar panel |
@@ -148,7 +181,7 @@ is assumed to be soccer, which is the only family using that form. ESPN
 publishes over 200 soccer competitions alone.
 
 ```bash
-omarchy bar set meirdick.scores leagues "mlb, eng.1, ned.1, rugby/270557"
+omarchy bar set meirdick.scores followedLeagues "mlb, eng.1, ned.1, rugby/270557"
 ```
 
 ## Where the data comes from
@@ -211,7 +244,7 @@ strings must not have it.
 | Key | Default | What |
 |---|---|---|
 | `followedTeams` | `""` | comma-separated `league:ABBR` |
-| `leagues` | `""` | extra leagues to poll and browse |
+| `followedLeagues` | `""` | comma-separated league slugs |
 | `livePollSec` | `25` | refresh while a followed game is live |
 | `idlePollSec` | `900` | floor when nothing you follow is on |
 | `barFormat` | `full` | `full`, `compact`, `icon` |
@@ -234,6 +267,8 @@ strings must not have it.
 omarchy-shell meirdick.scores toggle
 omarchy-shell meirdick.scores refresh
 omarchy-shell meirdick.scores follow mlb BOS
+omarchy-shell meirdick.scores followLeague eng.1
+omarchy-shell meirdick.scores following               # teams and leagues, as JSON
 omarchy-shell meirdick.scores route standings:nfl    # "", leagues, league:mlb, standings:nfl, search
 omarchy-shell meirdick.scores diagnose               # JSON: what the widget believes
 ```
@@ -282,6 +317,13 @@ Three things that will cost you an hour if nobody tells you:
   reason with `quickshell log -i "$(quickshell list --all | grep -oP 'Instance \K\w+' | head -1)" -t 100`.
 - **`qmllint` on Arch is a stub** that exits 0 on a deliberate syntax error.
   Loading the plugin is the only real test.
+- **The injected `settings` object does not reliably follow `shell.json`.**
+  Writing a new `followedTeams` and reading it back returned the old value for
+  as long as the shell stayed up; `omarchy-shell shell reloadConfig` did not
+  shake it loose, only a full restart did. Since following a team writes to
+  that file, the plugin watches `shell.json` itself with a `FileView` and
+  prefers what the file says. When the injection works, both agree and the
+  watcher changes nothing.
 
 Nerd Font codepoints are checked against the shipped font's charset before use.
 The marks here are drawn from primitives instead, because the shell's font

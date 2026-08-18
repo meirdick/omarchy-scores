@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "meirdick.scores",
   "name": "Scores",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "meirdick",
   "license": "MIT",
   "description": "Live sports scores in the Omarchy bar: follow teams across the US majors, college and world soccer, with a keyboard-driven scoreboard, standings and optional alerts.",
@@ -30,7 +30,6 @@
     "defaultSection": "right",
     "defaults": {
       "followedTeams": "",
-      "leagues": "",
       "livePollSec": 25,
       "idlePollSec": 900,
       "barFormat": "full",
@@ -45,7 +44,8 @@
       "closeMargin": 1,
       "closeClockSec": 300,
       "providerChain": "",
-      "espnHost": ""
+      "espnHost": "",
+      "followedLeagues": ""
     },
     "schema": [
       {
@@ -56,10 +56,10 @@
         "defaultValue": ""
       },
       {
-        "key": "leagues",
+        "key": "followedLeagues",
         "type": "string",
-        "label": "Extra leagues to poll",
-        "description": "Comma-separated canonical slugs, e.g. \"mlb, nfl, eng.1\". Leagues containing a followed team are always polled; this adds ones you only want to browse. Any ESPN slug works, including ones not in the built-in list.",
+        "label": "Followed leagues",
+        "description": "Comma-separated league slugs, e.g. \"nfl, eng.1\". A followed league is polled and all its games count as yours. Easier to set from the panel: press L, then f on a league. Any ESPN slug works, including ones not in the built-in list.",
         "defaultValue": ""
       },
       {
@@ -139,7 +139,7 @@
         "key": "notifyScore",
         "type": "boolean",
         "label": "Notify on every score",
-        "description": "Fires for either team in a followed game. The loudest option here — a high-scoring basketball game will notify dozens of times.",
+        "description": "Fires for either team in a followed game. The loudest option here \u2014 a high-scoring basketball game will notify dozens of times.",
         "defaultValue": false
       },
       {

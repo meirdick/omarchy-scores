@@ -53,8 +53,9 @@ Panel {
 
   readonly property var rows: service ? Model.buildRows({
     route: route,
-    games: service.games,
+    games: service.panelGames,
     follows: service.follows,
+    followedLeagues: service.followedLeagues,
     now: nowMs,
     filter: filter,
     loading: service.loading,
@@ -70,15 +71,16 @@ Panel {
   readonly property var leagueCounts: {
     var counts = {}
     if (!service) return counts
-    for (var league in service.gamesByLeague) counts[league] = service.gamesByLeague[league].length
+    var source = service.dateOffset === 0 ? service.gamesByLeague : service.browseByLeague
+    for (var league in source) counts[league] = source[league].length
     return counts
   }
 
   readonly property int liveCount: {
     if (!service) return 0
     var count = 0
-    for (var i = 0; i < service.games.length; i++)
-      if (service.games[i].state === "LIVE") count++
+    for (var i = 0; i < service.panelGames.length; i++)
+      if (service.panelGames[i].state === "LIVE") count++
     return count
   }
 
@@ -117,9 +119,11 @@ Panel {
     if (route !== "") return "h or esc to go back"
     if (service.follows.length === 0) return "No teams followed — press / to search, f to follow"
     var live = 0, following = 0
-    for (var i = 0; i < service.games.length; i++) {
-      if (service.games[i].state === "LIVE") live++
-      if (Model.isFollowedGame(Model.followSet(service.follows), service.games[i])) following++
+    var set = Model.followSet(service.follows)
+    var leagues = Model.leagueSet(service.followedLeagues)
+    for (var i = 0; i < service.panelGames.length; i++) {
+      if (service.panelGames[i].state === "LIVE") live++
+      if (Model.isFollowedGame(set, service.panelGames[i], leagues)) following++
     }
     var parts = []
     if (live > 0) parts.push(live + " live")
@@ -128,12 +132,7 @@ Panel {
     return parts.join("  ·  ")
   }
 
-  readonly property string heroDetail: {
-    if (!service) return ""
-    if (service.refreshing) return "SYNC"
-    if (service.lastRefreshMs > 0) return Model.relativeTime(service.lastRefreshMs, nowMs).toUpperCase()
-    return ""
-  }
+  readonly property string heroDetail: service && service.refreshing ? "SYNC" : ""
 
   // ------------------------------------------------------------- navigation
 
@@ -190,6 +189,7 @@ Panel {
   function goBack() {
     if (filtering) { stopFiltering(); return }
     if (route === "") { close(); return }
+    if (service && route.indexOf("league:") === 0) service.browsingLeague = ""
     var previous = route.indexOf("standings:") === 0 ? "league:" + route.slice(10) : ""
     var restored = routeCursors[previous]
     route = previous
@@ -208,16 +208,20 @@ Panel {
       return
     }
     if (row.kind === "league") {
+      // Polling follows the view: opening a competition you do not follow
+      // still has to fill it.
+      service.browsingLeague = row.league
       pushRoute("league:" + row.league)
       return
     }
     if (row.kind === "team") {
-      service.toggleFollow(row.league, row.abbr)
+      service.followTeam(row.league, row.abbr)
       return
     }
     if (row.kind === "standing") return
     if (row.kind === "action") {
       if (row.action === "leagues") { pushRoute("leagues"); return }
+      if (row.action === "search") { startFiltering(true); return }
       if (row.action === "open") {
         var game = currentGame()
         if (game) service.openUrl(game.detailUrl)
@@ -234,25 +238,55 @@ Panel {
   function currentGame() {
     if (route.indexOf("game:") !== 0 || !service) return null
     var id = route.slice(5)
-    for (var i = 0; i < service.games.length; i++) if (service.games[i].id === id) return service.games[i]
+    for (var i = 0; i < service.panelGames.length; i++)
+      if (service.panelGames[i].id === id) return service.panelGames[i]
     return null
   }
 
-  // Follow toggles from anywhere a team is on screen: a game row follows the
-  // team you are looking at, and a search result follows itself.
-  function followCurrent() {
+  // `f` follows, `x` unfollows. Never one key that does both: a toggle bound to
+  // a single key removes a team the moment you press it twice, or once by
+  // accident, and nothing on screen says a follow just disappeared.
+  function followCurrent() { applyFollow(true) }
+  function unfollowCurrent() { applyFollow(false) }
+
+  function applyFollow(add) {
     var row = currentRow
     if (!row || !service) return
-    if (row.kind === "team") { service.toggleFollow(row.league, row.abbr); return }
-    if (row.kind === "standing") { service.toggleFollow(row.league, row.entry.abbr); return }
+
+    if (row.kind === "league") {
+      if (add) service.followLeague(row.league)
+      else service.unfollowLeague(row.league)
+      return
+    }
+    if (row.kind === "team") {
+      if (add) service.followTeam(row.league, row.abbr)
+      else service.unfollowTeam(row.league, row.abbr)
+      return
+    }
+    if (row.kind === "standing") {
+      if (add) service.followTeam(row.league, row.entry.abbr)
+      else service.unfollowTeam(row.league, row.entry.abbr)
+      return
+    }
     if (row.kind !== "game") return
+
+    // A game names two teams, so "follow this row" is ambiguous. Adding takes
+    // the home side unless the home side is already followed, which makes
+    // pressing f twice on a derby follow both rather than nothing.
     var game = row.game
     var set = Model.followSet(service.follows)
-    // Ambiguous by design: a game has two teams. Follow the one not already
-    // followed, which makes the key idempotent from either side.
-    if (Model.isFollowedTeam(set, game.league, game.home.abbr)) service.toggleFollow(game.league, game.home.abbr)
-    else if (Model.isFollowedTeam(set, game.league, game.away.abbr)) service.toggleFollow(game.league, game.away.abbr)
-    else service.toggleFollow(game.league, game.home.abbr)
+    var home = Model.isFollowedTeam(set, game.league, game.home.abbr)
+    var away = Model.isFollowedTeam(set, game.league, game.away.abbr)
+
+    if (add) {
+      if (!home) service.followTeam(game.league, game.home.abbr)
+      else if (!away) service.followTeam(game.league, game.away.abbr)
+      else service.flashStatus("Following both already")
+      return
+    }
+    if (away) service.unfollowTeam(game.league, game.away.abbr)
+    else if (home) service.unfollowTeam(game.league, game.home.abbr)
+    else service.flashStatus("Not following either team")
   }
 
   function openCurrent() {
@@ -343,19 +377,34 @@ Panel {
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
     function refresh(): void { if (root.service) root.service.refresh() }
+    // Quickshell's IPC matches on exact arity, so a league cannot be an
+    // optional second argument to follow() — it needs its own pair.
     function follow(league: string, abbr: string): string {
       if (!root.service) return "no service"
-      var set = Model.followSet(root.service.follows)
-      if (Model.isFollowedTeam(set, league, abbr)) return "already following"
-      root.service.toggleFollow(league, abbr)
+      root.service.followTeam(league, abbr)
       return "following " + league + ":" + String(abbr).toUpperCase()
     }
     function unfollow(league: string, abbr: string): string {
       if (!root.service) return "no service"
-      var set = Model.followSet(root.service.follows)
-      if (!Model.isFollowedTeam(set, league, abbr)) return "not following"
-      root.service.toggleFollow(league, abbr)
+      root.service.unfollowTeam(league, abbr)
       return "unfollowed " + league + ":" + String(abbr).toUpperCase()
+    }
+    function followLeague(league: string): string {
+      if (!root.service) return "no service"
+      root.service.followLeague(league)
+      return "following league " + league
+    }
+    function unfollowLeague(league: string): string {
+      if (!root.service) return "no service"
+      root.service.unfollowLeague(league)
+      return "unfollowed league " + league
+    }
+    function following(): string {
+      if (!root.service) return "no service"
+      return JSON.stringify({
+        teams: root.service.follows,
+        leagues: root.service.followedLeagues
+      }, null, 2)
     }
     // QML load failures and bad settings are both silent on screen, so this is
     // the only practical way to see what the widget believes.
@@ -406,6 +455,7 @@ Panel {
         root.moveCursor(dx, dy)
       }
       onActivateRequested: root.activateCursor()
+      onDeleteRequested: root.unfollowCurrent()
       onCloseRequested: root.goBack()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(text) {
@@ -535,12 +585,12 @@ Panel {
 
   readonly property string legendText: {
     if (filtering) return "type to filter  ·  ↓ or enter to the list  ·  esc cancels"
-    if (route === "search") return "f follow  ·  / search again  ·  esc back"
+    if (route === "search") return "f follow  ·  x unfollow  ·  / search again  ·  esc back"
     if (route.indexOf("game:") === 0) return "o open on the web  ·  f follow  ·  h back"
-    if (route === "leagues") return "l open  ·  h back"
-    if (route.indexOf("standings:") === 0) return "f follow  ·  h back"
+    if (route === "leagues") return "f follow league  ·  x unfollow  ·  l open  ·  h back"
+    if (route.indexOf("standings:") === 0) return "f follow  ·  x unfollow  ·  h back"
     if (route.indexOf("league:") === 0) return "l detail  ·  f follow  ·  o web  ·  h back"
-    return "l detail  ·  f follow  ·  / search  ·  [ ] day  ·  r refresh"
+    return "l detail  ·  f follow  ·  x unfollow  ·  / search  ·  [ ] day"
   }
 
   // ------------------------------------------------------------- delegates
@@ -1001,11 +1051,15 @@ Panel {
           anchors.right: leagueHint.left
           anchors.rightMargin: Style.space(8)
           anchors.verticalCenter: parent.verticalCenter
-          text: row ? String(row.label || "") : ""
+          text: {
+            if (!row) return ""
+            return (row.followed ? "★  " : "") + String(row.label || "")
+          }
           elide: Text.ElideRight
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
+          font.bold: row && row.followed === true
         }
         Text {
           id: leagueHint
@@ -1111,7 +1165,7 @@ Panel {
           anchors.left: standingCrest.right
           anchors.leftMargin: Style.space(8)
           anchors.verticalCenter: parent.verticalCenter
-          text: row ? row.entry.name : ""
+          text: row ? ((row.followed ? "★ " : "") + row.entry.name) : ""
           elide: Text.ElideRight
           width: parent.width - Style.space(150)
           // Top of the table gets the emphasis; everyone else is reference.

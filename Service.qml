@@ -13,13 +13,56 @@ Item {
   id: root
   visible: false
 
+  // Settings injected by the bar host. Authoritative in principle, but see
+  // fileSettings below.
   property var settings: ({})
+
+  // ---------------------------------------------------------------- settings
+  //
+  // The bar injects `settings` from the widget's shell.json entry, but that
+  // injection does not reliably re-run when the file changes underneath it:
+  // writing a new followedTeams and reading it back showed the old value for
+  // as long as the shell stayed up, and `omarchy-shell shell reloadConfig` did
+  // not shake it loose either — only a full restart did.
+  //
+  // Following a team writes to that file, so relying on the injection alone
+  // means pressing f appears to do nothing until the next restart. Watch the
+  // file directly and prefer what it says. When the injection is working, both
+  // agree and this changes nothing.
+  readonly property string shellConfigPath: Quickshell.env("HOME") + "/.config/omarchy/shell.json"
+  property var fileSettings: ({})
+
+  FileView {
+    path: root.shellConfigPath
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoaded: {
+      // null means the file was unreadable — caught mid-save. Keep the last
+      // good copy rather than briefly forgetting every followed team.
+      var parsed = Model.widgetSettingsFrom(text(), root.moduleId)
+      if (parsed !== null) root.fileSettings = parsed
+    }
+    onLoadFailed: root.fileSettings = ({})
+  }
+
+  readonly property string moduleId: "meirdick.scores"
 
   // --- results -------------------------------------------------------------
   // league slug -> array of normalized Game. Kept per league so one league
   // failing cannot blank the others.
+  //
+  // Today is tracked separately from whatever day the panel is browsing. The
+  // bar is a glance at now: paging to tomorrow in the panel must not change
+  // what the bar says, because the widget resizes to its text and the whole
+  // bar shifts around it. It also keeps alerts honest — a game on next
+  // Tuesday's card has not just started.
   property var gamesByLeague: ({})
   property var games: []
+  property var browseByLeague: ({})
+  property var browseGames: []
+  // What the panel should render: today's set unless it is showing another day.
+  readonly property var panelGames: dateOffset === 0 ? games : browseGames
   property var standings: []
   property string standingsLeague: ""
   property var summary: null
@@ -50,8 +93,11 @@ Item {
   // --- settings ------------------------------------------------------------
   // Manifest defaults are not merged into the injected settings by the shell,
   // so every default is restated here. Changing one means changing both.
+  // The file wins: it is the thing the panel writes to and the thing a hand
+  // edit changes, and it is never staler than the injected copy.
   function setting(name, fallback) {
-    var value = settings ? settings[name] : undefined
+    var value = fileSettings ? fileSettings[name] : undefined
+    if (value === undefined || value === null) value = settings ? settings[name] : undefined
     return value === undefined || value === null ? fallback : value
   }
 
@@ -71,6 +117,7 @@ Item {
   }
 
   readonly property var follows: Model.normalizeFollows(setting("followedTeams", ""))
+  readonly property var followedLeagues: Model.normalizeLeagues(setting("followedLeagues", ""))
   readonly property int livePollSec: intSetting("livePollSec", 25, 10, 300)
   readonly property int idlePollSec: intSetting("idlePollSec", 900, 60, 7200)
   readonly property string barFormat: String(setting("barFormat", "full"))
@@ -102,20 +149,28 @@ Item {
   // the default list is derived rather than hardcoded.
   readonly property var polledLeagues: {
     var seen = {}, out = []
-    for (var i = 0; i < follows.length; i++) {
-      var slug = follows[i].split(":")[0]
-      if (slug !== "" && !seen[slug] && Leagues.resolve(slug)) { seen[slug] = true; out.push(slug) }
+    function add(slug) {
+      var name = String(slug || "").trim()
+      if (name === "" || seen[name] || !Leagues.resolve(name)) return
+      seen[name] = true
+      out.push(name)
     }
-    var extra = String(setting("leagues", "") || "").split(/[\s,]+/)
-    for (var j = 0; j < extra.length; j++) {
-      var name = String(extra[j] || "").trim()
-      if (name !== "" && !seen[name] && Leagues.resolve(name)) { seen[name] = true; out.push(name) }
-    }
+    for (var i = 0; i < follows.length; i++) add(follows[i].split(":")[0])
+    for (var j = 0; j < followedLeagues.length; j++) add(followedLeagues[j])
+    // The league currently being browsed, so opening a competition you do not
+    // follow still shows its card instead of an empty view.
+    add(browsingLeague)
     return out
   }
 
+  // Set by the panel when a league view is open. Cleared on the way out so an
+  // idle session does not keep polling a league you glanced at once.
+  property string browsingLeague: ""
+
+  // Always today's games, never the browsed day's.
   readonly property var barInfo: Model.barState(games, follows, nowMs, {
     format: barFormat,
+    leagues: followedLeagues,
     rotateIndex: rotateIndex,
     finalWindowHours: finalWindowHours,
     formatTime: root.formatTime
@@ -247,21 +302,28 @@ Item {
     }
 
     root.refreshing = true
-    root._pending = leagues.length
-    var date = root.currentDate()
+    // Today always. When the panel is showing another day, that day is fetched
+    // alongside so the bar and the panel can disagree about the date without
+    // either going stale.
+    var browsing = root.dateOffset !== 0
+    root._pending = leagues.length * (browsing ? 2 : 1)
 
-    for (var i = 0; i < leagues.length; i++) fetchLeague(leagues[i], date)
+    var today = new Date()
+    for (var i = 0; i < leagues.length; i++) fetchLeague(leagues[i], today, false)
+    if (!browsing) return
+    var browsed = root.currentDate()
+    for (var j = 0; j < leagues.length; j++) fetchLeague(leagues[j], browsed, true)
   }
 
-  function fetchLeague(league, date) {
+  function fetchLeague(league, date, forBrowse) {
     var chain = Leagues.providersFor(league, root.providerChain)
-    fetchLeagueVia(league, date, chain, 0)
+    fetchLeagueVia(league, date, chain, 0, forBrowse === true)
   }
 
   // Walk the provider chain: if the first provider fails, fall through to the
   // next rather than leaving the league blank. Only the last failure is
   // reported, because an ESPN hiccup that statsapi covered is not news.
-  function fetchLeagueVia(league, date, chain, index) {
+  function fetchLeagueVia(league, date, chain, index, forBrowse) {
     if (index >= chain.length) {
       root.lastError = Leagues.displayName(league) + ": no provider available"
       finishLeague()
@@ -270,7 +332,7 @@ Item {
     var providerName = chain[index]
     var provider = Providers.get(providerName)
     var url = provider ? provider.scoreboardUrl(league, date, providerName === "espn" && root.espnHost !== "" ? root.espnHost : undefined) : ""
-    if (url === "") { fetchLeagueVia(league, date, chain, index + 1); return }
+    if (url === "") { fetchLeagueVia(league, date, chain, index + 1, forBrowse); return }
 
     // The ETag is per league, per provider and per date — sharing one across
     // dates would serve yesterday's card as "unchanged".
@@ -281,7 +343,7 @@ Item {
       etagPath: etagPath,
       done: function(exitCode, body, error) {
         if (exitCode !== 0) {
-          if (index + 1 < chain.length) { fetchLeagueVia(league, date, chain, index + 1); return }
+          if (index + 1 < chain.length) { fetchLeagueVia(league, date, chain, index + 1, forBrowse); return }
           root.lastError = Leagues.displayName(league) + ": " + (error || "curl exited " + exitCode)
           finishLeague()
           return
@@ -289,23 +351,25 @@ Item {
 
         // Empty body with a clean exit is curl reporting 304 Not Modified.
         // Keep what we already have; it is by definition current.
-        if (String(body).trim() === "" && root.gamesByLeague[league] !== undefined) {
+        var bucket = forBrowse ? root.browseByLeague : root.gamesByLeague
+        if (String(body).trim() === "" && bucket[league] !== undefined) {
           finishLeague()
           return
         }
 
         var parsed = provider.parseScoreboard(body, league, Date.now())
         if (!parsed.ok) {
-          if (index + 1 < chain.length) { fetchLeagueVia(league, date, chain, index + 1); return }
+          if (index + 1 < chain.length) { fetchLeagueVia(league, date, chain, index + 1, forBrowse); return }
           root.lastError = Leagues.displayName(league) + ": " + parsed.error
           finishLeague()
           return
         }
 
         var next = {}
-        for (var key in root.gamesByLeague) next[key] = root.gamesByLeague[key]
+        for (var key in bucket) next[key] = bucket[key]
         next[league] = parsed.games
-        root.gamesByLeague = next
+        if (forBrowse) root.browseByLeague = next
+        else root.gamesByLeague = next
         finishLeague()
       }
     })
@@ -322,18 +386,22 @@ Item {
     reschedule()
   }
 
-  function rebuildGames() {
+  function flatten(byLeague) {
     var merged = []
-    for (var league in root.gamesByLeague) {
-      var list = root.gamesByLeague[league]
+    for (var league in byLeague) {
+      var list = byLeague[league]
       for (var i = 0; i < list.length; i++) merged.push(list[i])
     }
-    root.games = merged
-    // Only today's card can produce a meaningful diff. Browsing to another
-    // date is not a score change, and diffing it would fire alerts for games
-    // that finished last week.
-    if (root.isToday()) emitEvents(merged)
-    else root.lastGames = ({})
+    return merged
+  }
+
+  function rebuildGames() {
+    root.games = flatten(root.gamesByLeague)
+    root.browseGames = flatten(root.browseByLeague)
+    // Diffing only ever looks at today. Paging the panel to another date is
+    // not a score change, and diffing it would alert on games that finished
+    // last week.
+    emitEvents(root.games)
   }
 
   // ------------------------------------------------------------- diffing
@@ -341,6 +409,7 @@ Item {
   function emitEvents(current) {
     var events = Model.diffGames(root.lastGames, current, {
       follows: root.follows,
+      leagues: root.followedLeagues,
       suppress: !root.primed,
       closeMargin: root.closeMargin,
       closeClockSec: root.closeClockSec
@@ -468,17 +537,58 @@ Item {
   // than keeping a private copy means a hand-edited config and a keypress in
   // the panel can never disagree — the same trick the weather plugin uses to
   // persist its location.
-  function toggleFollow(league, abbr) {
-    var next = Model.toggleFollow(root.follows, league, abbr)
-    // No --json: followedTeams is a plain comma-separated string, and passing
-    // --json makes omarchy-bar try to parse "mlb:TB" as JSON and write nothing.
-    Quickshell.execDetached(["omarchy", "bar", "set", "meirdick.scores",
-                             "followedTeams", next.join(",")])
-    var following = next.indexOf(Model.followKey(league, abbr)) >= 0
-    flashStatus((following ? "Following " : "Unfollowed ") + String(abbr).toUpperCase())
-    // The new league may not have been polled before; pick it up without
-    // waiting for shell.json to round-trip.
-    if (following) Qt.callLater(root.refresh)
+  // Following and unfollowing are separate actions on purpose. A single toggle
+  // bound to one key means a stray keypress silently empties the follow list
+  // and nothing says so — which is exactly how this lost its only team during
+  // development.
+  function writeSetting(key, value) {
+    // No --json: these are plain comma-separated strings, and --json makes
+    // omarchy-bar try to parse "mlb:TB" as JSON and write nothing at all.
+    Quickshell.execDetached(["omarchy", "bar", "set", root.moduleId, key, value])
+  }
+
+  function followTeam(league, abbr) {
+    var label = String(abbr).toUpperCase()
+    if (Model.isFollowedTeam(Model.followSet(root.follows), league, abbr)) {
+      flashStatus("Already following " + label)
+      return
+    }
+    writeSetting("followedTeams", Model.addFollow(root.follows, league, abbr).join(","))
+    flashStatus("Following " + label)
+    // The league may not have been polled before; pick it up without waiting
+    // for shell.json to round-trip.
+    Qt.callLater(root.refresh)
+  }
+
+  function unfollowTeam(league, abbr) {
+    var label = String(abbr).toUpperCase()
+    if (!Model.isFollowedTeam(Model.followSet(root.follows), league, abbr)) {
+      flashStatus("Not following " + label)
+      return
+    }
+    writeSetting("followedTeams", Model.removeFollow(root.follows, league, abbr).join(","))
+    flashStatus("Unfollowed " + label)
+  }
+
+  function followLeague(slug) {
+    var label = Leagues.displayName(slug)
+    if (root.followedLeagues.indexOf(String(slug)) >= 0) {
+      flashStatus("Already following " + label)
+      return
+    }
+    writeSetting("followedLeagues", Model.addFollowLeague(root.followedLeagues, slug).join(","))
+    flashStatus("Following " + label)
+    Qt.callLater(root.refresh)
+  }
+
+  function unfollowLeague(slug) {
+    var label = Leagues.displayName(slug)
+    if (root.followedLeagues.indexOf(String(slug)) < 0) {
+      flashStatus("Not following " + label)
+      return
+    }
+    writeSetting("followedLeagues", Model.removeFollowLeague(root.followedLeagues, slug).join(","))
+    flashStatus("Unfollowed " + label)
   }
 
   function flashStatus(text) {
@@ -500,9 +610,12 @@ Item {
   function setDateOffset(days) {
     if (root.dateOffset === days) return
     root.dateOffset = days
-    root.gamesByLeague = ({})
-    root.games = []
-    root.loading = true
+    // Only the browsed set is discarded. Today's games stay exactly as they
+    // are, so the bar does not blink, resize, or shove the rest of the bar
+    // sideways every time you page a day.
+    root.browseByLeague = ({})
+    root.browseGames = []
+    root.loading = days !== 0
     root.refreshing = false
     root._pending = 0
     Qt.callLater(root.refresh)
@@ -515,6 +628,7 @@ Item {
   readonly property int pollSec: Model.pollIntervalSec(games, follows, nowMs, {
     livePollSec: livePollSec,
     idlePollSec: idlePollSec,
+    leagues: followedLeagues,
     panelOpen: panelOpen
   })
 
@@ -532,6 +646,8 @@ Item {
   onPollSecChanged: reschedule()
   onPanelOpenChanged: if (panelOpen) Qt.callLater(root.refresh)
   onFollowsChanged: Qt.callLater(root.refresh)
+  onFollowedLeaguesChanged: Qt.callLater(root.refresh)
+  onBrowsingLeagueChanged: if (browsingLeague !== "") Qt.callLater(root.refresh)
 
   // A hung curl would otherwise wedge its slot forever, since a league is
   // skipped while its own request is still running. curl's --max-time is the
@@ -572,12 +688,21 @@ Item {
     for (var league in root.gamesByLeague) byLeague[league] = root.gamesByLeague[league].length
     return JSON.stringify({
       follows: root.follows,
+      followedLeagues: root.followedLeagues,
       polledLeagues: root.polledLeagues,
+      browsingLeague: root.browsingLeague,
       providerChain: root.providerChain,
       espnHost: root.espnHost === "" ? Providers.ESPN_HOST : root.espnHost,
+      settingsSource: {
+        injected: root.settings && root.settings.followedTeams !== undefined
+          ? String(root.settings.followedTeams) : null,
+        file: root.fileSettings && root.fileSettings.followedTeams !== undefined
+          ? String(root.fileSettings.followedTeams) : null
+      },
       dateOffset: root.dateOffset,
       gamesByLeague: byLeague,
       totalGames: root.games.length,
+      browsedGames: root.browseGames.length,
       bar: { mode: root.barInfo.mode, text: root.barInfo.text, count: root.barInfo.count },
       pollSec: root.pollSec,
       panelOpen: root.panelOpen,
