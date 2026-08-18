@@ -82,5 +82,41 @@ check("mlb provider refuses other leagues", P.mlb.scoreboardUrl("nfl", new Date(
 check("summary of garbage is null", P.espn.parseSummary("nope") === null)
 check("summary of empty is null", P.espn.parseSummary("") === null)
 
+// --- standings ordering ----------------------------------------------------
+// Each sport is read by a different column, and ESPN does not return the
+// entries in table order. Getting this wrong put a 46-36 team above a 56-26 one.
+;[["mlb", "winPercent"], ["nba", "winPercent"], ["nhl", "points"], ["eng1", "rank"]].forEach(function(pair) {
+  var groups = P.espn.parseStandings(fs.readFileSync(__dirname + "/../fixtures/" + pair[0] + "-standings.json", "utf8"))
+  check(pair[0] + " standings parse", groups.length > 0)
+  var rows = groups[0].rows
+  console.log("\n" + pair[0] + " (" + groups[0].name + ") ordered by " + pair[1] + ":")
+  rows.slice(0, 4).forEach(function(r, i) {
+    console.log("   " + (i + 1) + ". " + r.name.padEnd(24) + " " + (r.wins + "-" + r.losses).padEnd(8) +
+      " pct=" + (r.winPercent || "-").padEnd(6) + " pts=" + (r.points || "-"))
+  })
+  check(pair[0] + " table is not empty", rows.length > 1)
+
+  // Whatever the sport ranks on must be non-increasing down the table.
+  for (var i = 1; i < rows.length; i++) {
+    var prev = rows[i - 1], cur = rows[i]
+    if (pair[1] === "rank")
+      check(pair[0] + " rank ascends", prev.rank <= cur.rank, prev.name + " then " + cur.name)
+    else if (pair[1] === "winPercent")
+      check(pair[0] + " win percentage descends", prev._winPercent >= cur._winPercent,
+            prev.name + " " + prev.winPercent + " then " + cur.name + " " + cur.winPercent)
+    else
+      check(pair[0] + " points descend", prev._points >= cur._points,
+            prev.name + " " + prev.points + " then " + cur.name + " " + cur.points)
+  }
+})
+
+// playoffSeed must not be mistaken for a table order: MLB seeds division
+// winners first, which is the bug this guards.
+var mlbStand = P.espn.parseStandings(fs.readFileSync(__dirname + "/../fixtures/mlb-standings.json", "utf8"))
+var seeds = mlbStand[0].rows.map(function(r) { return r.seed })
+check("MLB is not merely sorted by playoff seed",
+      seeds.some(function(s, i) { return i > 0 && s < seeds[i - 1] }),
+      "seeds came out ascending, so seed order was used")
+
 console.log(failures === 0 ? "\nOK — all assertions passed" : "\n" + failures + " FAILURES")
 process.exit(failures === 0 ? 0 : 1)

@@ -123,12 +123,13 @@ Item {
   readonly property string barFormat: String(setting("barFormat", "full"))
   readonly property int rotateSec: intSetting("rotateSec", 6, 3, 60)
   readonly property bool showSituation: boolSetting("showSituation", true)
-  readonly property bool showAllGames: boolSetting("showAllGames", true)
+  readonly property bool showAllGames: boolSetting("showAllGames", false)
   readonly property int finalWindowHours: intSetting("finalWindowHours", 8, 0, 48)
   readonly property bool notifyStart: boolSetting("notifyStart", false)
   readonly property bool notifyScore: boolSetting("notifyScore", false)
   readonly property bool notifyFinal: boolSetting("notifyFinal", false)
   readonly property bool notifyClose: boolSetting("notifyClose", false)
+  readonly property bool notifyLeagues: boolSetting("notifyLeagues", false)
   readonly property int closeMargin: intSetting("closeMargin", 1, 1, 20)
   readonly property int closeClockSec: intSetting("closeClockSec", 300, 30, 1800)
   readonly property string espnHost: String(setting("espnHost", "") || "").trim()
@@ -410,6 +411,7 @@ Item {
     var events = Model.diffGames(root.lastGames, current, {
       follows: root.follows,
       leagues: root.followedLeagues,
+      notifyLeagues: root.notifyLeagues,
       suppress: !root.primed,
       closeMargin: root.closeMargin,
       closeClockSec: root.closeClockSec
@@ -714,7 +716,8 @@ Item {
       primed: root.primed,
       notifications: {
         start: root.notifyStart, score: root.notifyScore,
-        final: root.notifyFinal, close: root.notifyClose
+        final: root.notifyFinal, close: root.notifyClose,
+        leagues: root.notifyLeagues
       }
     }, null, 2)
   }

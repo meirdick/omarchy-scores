@@ -36,7 +36,7 @@ function parseJson(text) {
 }
 
 function emptyTeam() {
-  return { abbr: "", name: "", score: null, logo: "", color: "", record: "" }
+  return { abbr: "", name: "", score: null, logo: "", color: "", altColor: "", record: "" }
 }
 
 // A date as ESPN wants it in ?dates=, in the machine's own timezone. Using UTC
@@ -112,8 +112,12 @@ function espnTeam(competitor) {
     fullName: String(team.displayName || ""),
     id: String(team.id || ""),
     score: toScore(competitor.score),
-    // ESPN sends bare hex with no leading '#'.
+    // ESPN sends bare hex with no leading '#'. `alternateColor` is the club's
+    // bright secondary and is usually the only one of the two that is visible
+    // on a dark panel — two thirds of teams have a near-black primary, and
+    // three of them are literally #000000.
     color: team.color ? "#" + String(team.color) : "",
+    altColor: team.alternateColor ? "#" + String(team.alternateColor) : "",
     logo: String(team.logo || ""),
     record: record,
     lines: lines,
@@ -269,6 +273,13 @@ var espn = {
   // `stats` is a flat name/displayValue array. Look entries up by name; the
   // order is not stable and indexing it positionally silently mislabels
   // columns.
+  //
+  // The entries themselves are not returned in table order either — the NBA
+  // came back with a 46-36 team sitting second above a 56-26 one — so they are
+  // sorted here. Each sport publishes its own idea of position: basketball and
+  // hockey use `playoffSeed`, soccer uses `rank`. Where one exists it is
+  // authoritative, because it already encodes that sport's tiebreakers, which
+  // are not something to reimplement from a win column.
   parseStandings: function(text) {
     var data = parseJson(text)
     if (!data) return []
@@ -280,6 +291,14 @@ var espn = {
         if (String(stats[i].name || "") === name)
           return String(stats[i].displayValue !== undefined ? stats[i].displayValue : stats[i].value)
       return ""
+    }
+
+    function numberOf(stats, name) {
+      var raw = statOf(stats, name)
+      if (raw === "") return null
+      // ".732" and "+8.2" both parse; "-" and "" do not, which is the point.
+      var n = parseFloat(String(raw).replace(/^\+/, ""))
+      return isFinite(n) ? n : null
     }
 
     function walk(node) {
@@ -299,9 +318,15 @@ var espn = {
             points: statOf(entry.stats, "points"),
             winPercent: statOf(entry.stats, "winPercent"),
             gamesBehind: statOf(entry.stats, "gamesBehind"),
-            streak: statOf(entry.stats, "streak")
+            streak: statOf(entry.stats, "streak"),
+            seed: numberOf(entry.stats, "playoffSeed"),
+            rank: numberOf(entry.stats, "rank"),
+            _winPercent: numberOf(entry.stats, "winPercent"),
+            _points: numberOf(entry.stats, "points"),
+            _wins: numberOf(entry.stats, "wins")
           })
         }
+        sortStandingRows(rows)
         groups.push({ name: String(node.name || node.displayName || ""), rows: rows })
       }
       if (Array.isArray(node.children))
@@ -441,7 +466,7 @@ var mlb = {
             fullName: String(team.name || ""),
             id: String(team.id || ""),
             score: toScore(entry && entry.score),
-            color: "", logo: "",
+            color: "", altColor: "", logo: "",
             record: entry && entry.leagueRecord
               ? String(entry.leagueRecord.wins) + "-" + String(entry.leagueRecord.losses) : "",
             lines: [],
@@ -527,7 +552,7 @@ var nhl = {
         fullName: String(entry.placeName && entry.placeName.default || ""),
         id: String(entry.id || ""),
         score: toScore(entry.score),
-        color: "",
+        color: "", altColor: "",
         logo: String(entry.logo || ""),
         record: "", lines: [], winner: false
       }
@@ -569,6 +594,48 @@ var nhl = {
   }
 }
 
+// Order a standings table. Each sport publishes a different set of ranking
+// columns, and the right one is whichever that sport is actually read by:
+//
+//   soccer  rank        already encodes goal difference and the other tiebreaks
+//   NBA/MLB winPercent  the record table people expect
+//   NHL     points      no winPercent at all, and an OT loss is still a point
+//
+// playoffSeed exists nearly everywhere but is not a table order: MLB seeds
+// division winners first, which puts a 65-58 team above a 69-55 one. It is the
+// last resort, not the first.
+function sortStandingRows(rows) {
+  function everyHas(key) {
+    for (var i = 0; i < rows.length; i++) if (rows[i][key] === null) return false
+    return rows.length > 0
+  }
+
+  if (everyHas("rank")) {
+    rows.sort(function(a, b) { return a.rank - b.rank })
+    return rows
+  }
+
+  var descending = everyHas("_winPercent") ? "_winPercent" : (everyHas("_points") ? "_points" : "")
+  if (descending !== "") {
+    rows.sort(function(a, b) {
+      var primary = b[descending] - a[descending]
+      if (primary !== 0) return primary
+      return (b._wins === null ? -1 : b._wins) - (a._wins === null ? -1 : a._wins)
+    })
+    return rows
+  }
+
+  if (everyHas("seed")) {
+    rows.sort(function(a, b) { return a.seed - b.seed })
+    return rows
+  }
+
+  rows.sort(function(a, b) {
+    return (b._wins === null ? -1 : b._wins) - (a._wins === null ? -1 : a._wins)
+  })
+  return rows
+}
+
 // ------------------------------------------------------------------ registry
 
 var REGISTRY = { espn: espn, mlb: mlb, nhl: nhl }
@@ -578,7 +645,7 @@ function get(name) { return REGISTRY[String(name)] || null }
 if (typeof module !== "undefined") {
   module.exports = {
     espn: espn, mlb: mlb, nhl: nhl,
-    get: get, useLeagues: useLeagues,
+    get: get, useLeagues: useLeagues, sortStandingRows: sortStandingRows,
     espnDate: espnDate, isoDate: isoDate, toScore: toScore,
     ESPN_HOST: ESPN_HOST, ESPN_ALT_HOST: ESPN_ALT_HOST, ESPN_CORE_HOST: ESPN_CORE_HOST
   }

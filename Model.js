@@ -342,7 +342,10 @@ function diffGames(previous, current, options) {
   var opts = options || {}
   if (opts.suppress) return []
   var set = followSet(opts.follows)
-  var leagues = leagueSet(opts.leagues)
+  // A league follow is a viewing preference, a team follow is an alerting one.
+  // Following the Premier League to see its card should not mean a phone-style
+  // buzz for every goal in every match, so leagues only alert when asked.
+  var leagues = opts.notifyLeagues ? leagueSet(opts.leagues) : ({})
   var events = []
 
   for (var i = 0; i < current.length; i++) {
@@ -534,42 +537,62 @@ function matchesFilter(game, filter) {
   return haystack.indexOf(filter) >= 0
 }
 
+// Today's card. What appears here is exactly what you follow, and the two
+// kinds of follow answer different questions:
+//
+//   a team   -> that team's games, and nothing else from its league
+//   a league -> that whole competition's card, listed under your teams
+//
+// Following a club used to drag its entire league onto the card, because the
+// league has to be polled to find the club's game. Polling and showing are now
+// separate decisions: the league is fetched either way, but its other games
+// are only rendered if you asked for the league itself.
 function todayRows(state, set, nowMs, formatTime, filter, games, leagues) {
   var rows = []
   var visible = games.filter(function(g) { return matchesFilter(g, filter) })
-  var followed = visible.filter(function(g) { return isFollowedGame(set, g, leagues) })
-  var others = visible.filter(function(g) { return !isFollowedGame(set, g, leagues) })
 
-  var followedLive = sortGames(followed.filter(function(g) { return g.state === "LIVE" }))
-  var followedRest = sortGames(followed.filter(function(g) { return g.state !== "LIVE" }))
-  var othersLive = sortGames(others.filter(function(g) { return g.state === "LIVE" }))
-  var othersRest = sortGames(others.filter(function(g) { return g.state !== "LIVE" }))
+  var mine = [], byLeague = {}, other = []
+  for (var i = 0; i < visible.length; i++) {
+    var game = visible[i]
+    if (isFollowedByTeam(set, game)) mine.push(game)
+    else if (isFollowedLeague(leagues, game.league)) {
+      if (!byLeague[game.league]) byLeague[game.league] = []
+      byLeague[game.league].push(game)
+    } else other.push(game)
+  }
 
-  if (followedLive.length > 0) {
-    rows.push(section("Live", String(followedLive.length)))
-    for (var i = 0; i < followedLive.length; i++) rows.push(gameRow(followedLive[i], set, nowMs, formatTime, leagues))
+  function push(title, list) {
+    if (list.length === 0) return
+    rows.push(section(title, String(list.length)))
+    for (var i = 0; i < list.length; i++)
+      rows.push(gameRow(list[i], set, nowMs, formatTime, leagues))
   }
-  if (followedRest.length > 0) {
-    rows.push(section("Your teams", String(followedRest.length)))
-    for (var j = 0; j < followedRest.length; j++) rows.push(gameRow(followedRest[j], set, nowMs, formatTime, leagues))
+
+  // Your clubs split live from the rest: a game in progress is the reason the
+  // panel is open, and it should not sit under last night's final.
+  push("Live", sortGames(mine.filter(function(g) { return g.state === "LIVE" })))
+  push("Your teams", sortGames(mine.filter(function(g) { return g.state !== "LIVE" })))
+
+  // One section per followed competition, in the order they were listed, so
+  // the card keeps a stable shape rather than reordering as games go live.
+  var followedLeagues = normalizeLeagues(state.followedLeagues)
+  for (var j = 0; j < followedLeagues.length; j++) {
+    var slug = followedLeagues[j]
+    push(displayLeague(slug), sortGames(byLeague[slug] || []))
   }
-  if (othersLive.length > 0) {
-    rows.push(section("Live elsewhere", String(othersLive.length)))
-    for (var k = 0; k < othersLive.length; k++) rows.push(gameRow(othersLive[k], set, nowMs, formatTime, leagues))
-  }
-  if (state.showAll !== false && othersRest.length > 0) {
-    rows.push(section("Also today", String(othersRest.length)))
-    for (var m = 0; m < othersRest.length; m++) rows.push(gameRow(othersRest[m], set, nowMs, formatTime, leagues))
-  }
+
+  // Everything else in the leagues being polled. Off by default: those leagues
+  // are only being fetched because a club you follow plays in them.
+  if (state.showAll) push("Also today", sortGames(other))
 
   var nothingFollowed = normalizeFollows(state.follows).length === 0 &&
-                        normalizeLeagues(state.followedLeagues).length === 0
+                        followedLeagues.length === 0
 
   if (rows.length === 0) {
     if (state.loading) rows.push(note("Loading…", "loading"))
     else if (filter !== "") rows.push(note("Nothing matches “" + state.filter + "”", "nomatch"))
     else if (nothingFollowed) rows.push(note("Nothing followed yet. Start here:", "nofollows"))
-    else rows.push(note("No games scheduled", "nogames"))
+    else rows.push(note("Nothing you follow is playing today", "nogames"))
   }
 
   // Adding a team is a listed action, not only a keybind. A fresh install
@@ -577,10 +600,13 @@ function todayRows(state, set, nowMs, formatTime, filter, games, leagues) {
   // legend, and the legend is the first thing nobody reads.
   var follow = [
     section("Follow", ""),
+    // Search covers teams and leagues both, so this is one action. Browsing
+    // the league list stays as its own row because it answers a different
+    // question — "what is there?" rather than "where is this?".
     { kind: "action", key: "action:search", selectable: true, action: "search",
-      label: "Add a team", hint: "/" },
+      label: "Add a team or league", hint: "/" },
     { kind: "action", key: "action:leagues", selectable: true, action: "leagues",
-      label: "Add a league", hint: "L" }
+      label: "Browse all leagues", hint: "L" }
   ]
 
   // Always last. On a fresh install the only row above them is the note that
@@ -588,14 +614,63 @@ function todayRows(state, set, nowMs, formatTime, filter, games, leagues) {
   return rows.concat(follow)
 }
 
+function displayLeague(slug) {
+  return Leagues ? Leagues.displayName(slug) : String(slug)
+}
+
+// A league's own view. Opening a competition used to show its games and
+// nothing else, which is an empty box for most of the year — the NBA in August
+// has no card at all — and left you pressing keys to find anything. Standings
+// are the thing a league always has, so they are the body of the view and
+// today's games sit above them when there are any.
 function leagueRows(state, set, nowMs, formatTime, leagues) {
   var slug = String(state.route).slice("league:".length)
   var rows = []
   var games = sortGames((state.games || []).filter(function(g) { return g.league === slug }))
-  if (games.length === 0) rows.push(note(state.loading ? "Loading…" : "No games scheduled", "empty"))
-  for (var i = 0; i < games.length; i++) rows.push(gameRow(games[i], set, nowMs, formatTime, leagues))
-  rows.push({ kind: "action", key: "action:standings", selectable: true, action: "standings:" + slug,
-              label: "Standings", hint: "" })
+
+  if (games.length > 0) {
+    rows.push(section("Today", String(games.length)))
+    for (var i = 0; i < games.length; i++)
+      rows.push(gameRow(games[i], set, nowMs, formatTime, leagues))
+  } else if (state.leagueLoading) {
+    rows.push(note("Loading…", "loadinggames"))
+  } else {
+    rows.push(note("No games today", "nogames"))
+  }
+
+  rows.push.apply(rows, standingRowsFor(state, set, slug))
+  return rows
+}
+
+// Shared by the league view and the standalone standings route so the two
+// cannot drift apart.
+function standingRowsFor(state, set, slug) {
+  var rows = []
+  var ready = state.standingsLeague === slug
+  var groups = ready && Array.isArray(state.standings) ? state.standings : []
+
+  if (groups.length === 0) {
+    rows.push(section("Standings", ""))
+    rows.push(note(ready ? "No standings published for this competition" : "Loading standings…",
+                   "nostand"))
+    return rows
+  }
+
+  for (var i = 0; i < groups.length; i++) {
+    // A league with one unnamed table still needs a heading, or its rows run
+    // straight on from the games above with nothing to separate them.
+    rows.push(section(groups[i].name !== "" ? groups[i].name : "Standings",
+                      String(groups[i].rows.length)))
+    for (var j = 0; j < groups[i].rows.length; j++) {
+      var entry = groups[i].rows[j]
+      rows.push({
+        kind: "standing", key: "standing:" + slug + ":" + entry.abbr + ":" + i + ":" + j,
+        selectable: true, league: slug, entry: entry, rank: j + 1,
+        followed: isFollowedTeam(set, slug, entry.abbr),
+        record: recordLabel(entry)
+      })
+    }
+  }
   return rows
 }
 
@@ -619,22 +694,7 @@ function leagueListRows(state, leagues) {
 }
 
 function standingsRows(state, set) {
-  var slug = String(state.route).slice("standings:".length)
-  var rows = []
-  var groups = state.standings || []
-  if (groups.length === 0) { rows.push(note(state.loading ? "Loading…" : "No standings available", "nostand")); return rows }
-  for (var i = 0; i < groups.length; i++) {
-    if (groups[i].name) rows.push(section(groups[i].name, ""))
-    for (var j = 0; j < groups[i].rows.length; j++) {
-      var entry = groups[i].rows[j]
-      rows.push({
-        kind: "standing", key: "standing:" + slug + ":" + entry.abbr + ":" + j, selectable: true,
-        league: slug, entry: entry, rank: j + 1,
-        record: recordLabel(entry)
-      })
-    }
-  }
-  return rows
+  return standingRowsFor(state, set, String(state.route).slice("standings:".length))
 }
 
 // "74-49-0" is not a baseball record. Ties only earn a column when a team has
@@ -644,6 +704,10 @@ function recordLabel(entry) {
   var record = entry.wins + "-" + entry.losses
   var ties = String(entry.ties || "")
   if (ties !== "" && ties !== "0") record += "-" + ties
+  // Hockey and soccer are ranked on points, so the record alone does not
+  // explain the order. Where there is no win percentage, points are the table.
+  if (String(entry.winPercent || "") === "" && String(entry.points || "") !== "")
+    record += "  " + entry.points + " pts"
   return record
 }
 
@@ -683,47 +747,85 @@ function gameDetailRows(state, set, nowMs, formatTime, leagues) {
   return rows
 }
 
+// One search box over both kinds of follow. Typing "premier" should find the
+// competition, not just fail to match any club — the search was teams-only and
+// left the league list as the only way to reach a league.
 function searchRows(state, set, leagues) {
   var filter = String(state.filter || "").trim().toLowerCase()
-  // No heading: the hero already says "Follow a team" and repeats the hint.
   var rows = []
   var teams = state.teams || []
 
-  var matches = []
-  if (filter !== "") {
-    for (var i = 0; i < teams.length && matches.length < 60; i++) {
-      var team = teams[i]
-      var haystack = (team.abbr + " " + team.name + " " + team.location + " " + team.league).toLowerCase()
-      if (haystack.indexOf(filter) >= 0) matches.push(team)
-    }
-  }
-
-  // With no query, show what is already followed so unfollowing is reachable
-  // without having to remember and retype the team's name.
   if (filter === "") {
-    var followed = normalizeFollows(state.follows)
-    if (followed.length === 0) rows.push(note("Type to search every team in every league", "nofollow"))
-    else rows.push(section("Following", String(followed.length)))
-    for (var j = 0; j < followed.length; j++) {
-      var parts = followed[j].split(":")
-      matches.push({ league: parts[0], abbr: parts[1], name: teamNameFor(teams, parts[0], parts[1]), location: "" })
+    // Nothing typed: show what is already followed, so unfollowing does not
+    // require remembering and retyping a name you are looking at.
+    var followedLeagues = normalizeLeagues(state.followedLeagues)
+    var followedTeams = normalizeFollows(state.follows)
+    if (followedTeams.length === 0 && followedLeagues.length === 0)
+      return [note("Type to search every team and league", "nofollow")]
+
+    if (followedTeams.length > 0) {
+      rows.push(section("Teams", String(followedTeams.length)))
+      for (var i = 0; i < followedTeams.length; i++) {
+        var parts = followedTeams[i].split(":")
+        rows.push(teamRow({ league: parts[0], abbr: parts[1],
+                            name: teamNameFor(teams, parts[0], parts[1]) }, set))
+      }
     }
+    if (followedLeagues.length > 0) {
+      rows.push(section("Leagues", String(followedLeagues.length)))
+      for (var j = 0; j < followedLeagues.length; j++)
+        rows.push(leagueRow(followedLeagues[j], leagues))
+    }
+    return rows
   }
 
-  if (filter !== "" && matches.length === 0)
-    rows.push(note(state.teamsLoading ? "Loading teams…" : "No team matches “" + state.filter + "”", "noteam"))
-
-  for (var k = 0; k < matches.length; k++) {
-    var entry = matches[k]
-    rows.push({
-      kind: "team", key: "team:" + entry.league + ":" + entry.abbr, selectable: true,
-      team: entry, league: entry.league, abbr: entry.abbr,
-      label: entry.name || entry.abbr,
-      hint: Leagues ? Leagues.displayName(entry.league) : entry.league,
-      followed: isFollowedTeam(set, entry.league, entry.abbr)
-    })
+  var teamMatches = []
+  for (var k = 0; k < teams.length && teamMatches.length < 60; k++) {
+    var team = teams[k]
+    var haystack = (team.abbr + " " + team.name + " " + team.location + " " + team.league).toLowerCase()
+    if (haystack.indexOf(filter) >= 0) teamMatches.push(team)
   }
+
+  var leagueMatches = []
+  var catalog = Leagues ? Leagues.browseList() : []
+  for (var m = 0; m < catalog.length; m++) {
+    var entry = catalog[m]
+    if ((entry.id + " " + entry.name + " " + entry.group).toLowerCase().indexOf(filter) >= 0)
+      leagueMatches.push(entry.id)
+  }
+
+  // Leagues lead when they match: there are a handful of them against
+  // thousands of clubs, so a league hit is the more specific result.
+  if (leagueMatches.length > 0) {
+    rows.push(section("Leagues", String(leagueMatches.length)))
+    for (var n = 0; n < leagueMatches.length; n++) rows.push(leagueRow(leagueMatches[n], leagues))
+  }
+  if (teamMatches.length > 0) {
+    rows.push(section("Teams", String(teamMatches.length)))
+    for (var q = 0; q < teamMatches.length; q++) rows.push(teamRow(teamMatches[q], set))
+  }
+  if (rows.length === 0)
+    rows.push(note(state.teamsLoading ? "Loading teams…" : "Nothing matches “" + state.filter + "”", "noteam"))
   return rows
+}
+
+function teamRow(entry, set) {
+  return {
+    kind: "team", key: "team:" + entry.league + ":" + entry.abbr, selectable: true,
+    team: entry, league: entry.league, abbr: entry.abbr,
+    label: entry.name || entry.abbr,
+    hint: displayLeague(entry.league),
+    followed: isFollowedTeam(set, entry.league, entry.abbr)
+  }
+}
+
+function leagueRow(slug, leagues) {
+  return {
+    kind: "league", key: "searchleague:" + slug, selectable: true,
+    league: slug, label: displayLeague(slug),
+    followed: isFollowedLeague(leagues, slug),
+    hint: "league"
+  }
 }
 
 function teamNameFor(teams, league, abbr) {
@@ -747,6 +849,89 @@ function relativeTime(ms, nowMs) {
   if (delta < HOUR) return Math.floor(delta / MINUTE) + "m ago"
   if (delta < DAY) return Math.floor(delta / HOUR) + "h ago"
   return Math.floor(delta / DAY) + "d ago"
+}
+
+// ------------------------------------------------------------------ colour
+
+// WCAG relative luminance of "#rrggbb". Used to decide whether a club's colour
+// is actually visible against the panel, not to meet a text contrast standard —
+// the spine is a 3px decoration, so the bar is set low.
+function luminance(hex) {
+  var raw = String(hex || "").replace("#", "")
+  if (!/^[0-9a-fA-F]{6}$/.test(raw)) return null
+  function channel(pair) {
+    var c = parseInt(pair, 16) / 255
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4)
+  }
+  return 0.2126 * channel(raw.slice(0, 2)) +
+         0.7152 * channel(raw.slice(2, 4)) +
+         0.0722 * channel(raw.slice(4, 6))
+}
+
+function contrastRatio(a, b) {
+  var la = luminance(a), lb = luminance(b)
+  if (la === null || lb === null) return 0
+  var hi = Math.max(la, lb), lo = Math.min(la, lb)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
+// The club colour to actually draw against `background`. Prefers the primary,
+// falls back to the club's own alternate — which is the bright secondary and
+// is usually the one meant for dark ground — and gives up rather than draw
+// something invisible.
+function teamAccent(team, background, minimum) {
+  if (!team) return ""
+  var floor = minimum === undefined ? 1.9 : minimum
+  var primary = String(team.color || "")
+  var alternate = String(team.altColor || "")
+  if (primary !== "" && contrastRatio(primary, background) >= floor) return primary
+  if (alternate !== "" && contrastRatio(alternate, background) >= floor) return alternate
+  // Neither reads — Colorado is dark purple over black. Lift the more colourful
+  // of the two toward white until it does, which keeps the club's hue instead
+  // of falling back to a generic accent. Picking by contrast here would choose
+  // the blacker one, since black is marginally further from a navy panel than
+  // a dark purple is.
+  if (primary === "" && alternate === "") return ""
+  var candidate = alternate === "" ? primary
+                : (primary === "" ? alternate
+                : (chroma(primary) >= chroma(alternate) ? primary : alternate))
+  return lift(candidate, background, floor)
+}
+
+// How much colour a hex carries, as the spread between its channels. Grey and
+// black score zero.
+function chroma(hex) {
+  var raw = String(hex || "").replace("#", "")
+  if (!/^[0-9a-fA-F]{6}$/.test(raw)) return -1
+  var r = parseInt(raw.slice(0, 2), 16)
+  var g = parseInt(raw.slice(2, 4), 16)
+  var b = parseInt(raw.slice(4, 6), 16)
+  return Math.max(r, g, b) - Math.min(r, g, b)
+}
+
+// Mix toward white until the result clears the contrast floor. Hue survives
+// for anything that has one; black becomes grey, which is the honest outcome.
+function lift(hex, background, floor) {
+  var raw = String(hex || "").replace("#", "")
+  if (!/^[0-9a-fA-F]{6}$/.test(raw)) return ""
+  var r = parseInt(raw.slice(0, 2), 16)
+  var g = parseInt(raw.slice(2, 4), 16)
+  var b = parseInt(raw.slice(4, 6), 16)
+
+  for (var step = 0; step <= 10; step++) {
+    var t = step / 10
+    var mixed = toHex(r + (255 - r) * t, g + (255 - g) * t, b + (255 - b) * t)
+    if (contrastRatio(mixed, background) >= floor) return mixed
+  }
+  return "#ffffff"
+}
+
+function toHex(r, g, b) {
+  function pair(v) {
+    var n = Math.max(0, Math.min(255, Math.round(v))).toString(16)
+    return n.length === 1 ? "0" + n : n
+  }
+  return "#" + pair(r) + pair(g) + pair(b)
 }
 
 // ------------------------------------------------------------- shell.json
@@ -860,7 +1045,10 @@ if (typeof module !== "undefined") {
     pollIntervalSec: pollIntervalSec,
     buildRows: buildRows, firstSelectable: firstSelectable, relativeTime: relativeTime,
     matchesFilter: matchesFilter, markGroups: markGroups,
+    standingRowsFor: standingRowsFor,
     widgetSettingsFrom: widgetSettingsFrom,
+    luminance: luminance, contrastRatio: contrastRatio, teamAccent: teamAccent,
+    chroma: chroma, lift: lift,
     leaderSide: leaderSide, winnerSide: winnerSide, stateToken: stateToken,
     activityKey: activityKey, progressFraction: progressFraction,
     regulationPeriods: regulationPeriods

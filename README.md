@@ -41,8 +41,9 @@ You can follow at two levels, and they are separate lists:
 
 ```bash
 # In the panel
-#   /  search every team in every league, then f to follow
-#   L  the league list, then f to follow the whole competition
+#   +  the button in the header, from any view
+#   /  search teams and leagues together, then enter or f to follow
+#   L  browse every league, then f to follow the whole competition
 #   f  follow whatever is under the cursor
 #   x  unfollow it
 
@@ -58,15 +59,32 @@ omarchy bar set meirdick.scores followedTeams "mlb:BOS, nfl:NYJ, eng.1:ARS"
 omarchy bar set meirdick.scores followedLeagues "nfl, eng.1"
 ```
 
+### Following a league is not the same as following all its teams
+
+They answer different questions, and the plugin treats them differently in
+three places:
+
+| | Follow a team | Follow a league |
+|---|---|---|
+| **Panel** | its games lead the card, under **Live** and **Your teams** | a section named after the competition, below your teams |
+| **Bar** | wins the slot | fills the bar only when none of your teams are playing |
+| **Notifications** | alerts, when you turn them on | silent, until you also set `notifyLeagues` |
+
+A team follow is an alerting relationship: you want to know. A league follow is
+a viewing one: you want the card. Following the Premier League to see the
+weekend's fixtures should not buzz for every goal in every match, so it does
+not — `notifyLeagues true` opts in if you want that.
+
+Following a club shows **that club**, not its division. The league still gets
+fetched, because that is how its game is found, but nothing else from it is
+rendered. Follow the league too, or set `showAllGames true`, if you want the
+rest.
+
 **`f` only ever adds and `x` only ever removes.** There is deliberately no
 single key that does both: a toggle removes a team the moment you press it
 twice or once by accident, and nothing on screen tells you a follow just
 disappeared. Pressing `f` on something you already follow says so and changes
 nothing.
-
-Following a league does not drown out your own clubs. If a club you follow is
-playing, the bar shows that game; the league's other games fill the bar only
-when none of your clubs are on. In the panel they all count as yours.
 
 Only leagues you follow, or that contain a team you follow, are polled. Opening
 a league you do not follow fetches it for as long as you are looking at it.
@@ -97,13 +115,26 @@ separate set that only the panel reads.
 
 ## The panel
 
-Opens on today: your live games first, then the rest of yours, then everything
-else that is live, then the remainder of the card.
+Opens on today, and shows only what you follow: your teams' live games first,
+then their other games, then one section per league you follow holding that
+competition's remaining card.
 
 Each game is two lines, one per team, with the club's own badge. The team that
 is ahead is bold and bright and the one behind recedes, so who is winning is
 readable without reading the numbers. A finished game marks the winner with a
 caret rather than a colour, so the result survives a monochrome theme.
+
+A game involving a club you follow carries a spine in that club's colour —
+only a club, not a league, or a followed competition would mark all ten of its
+fixtures identically and bury the one you care about. Follow both clubs in a
+derby and the spine splits in two.
+
+Club colours are checked against the panel before being drawn. Two thirds of
+teams publish a near-black primary and three are literally `#000000`, so the
+club's own bright alternate is used instead where the primary would be
+invisible; if neither reads, the more colourful of the two is lifted toward
+white until it does, which keeps the hue rather than falling back to a generic
+accent.
 
 State is signalled the same way everywhere: a **breathing dot** for live, a
 **hollow ring** for a game that has not started, a **flat bar** for one that is
@@ -117,12 +148,12 @@ the corner of your eye means something actually happened.
 | Key | Does |
 |---|---|
 | `j` `k` | move |
-| `l` `enter` | open the game, the league, the standings |
+| `l` `enter` | open the game or league; on a standings row, follow that team |
 | `h` `esc` | back, then close |
 | `f` | follow the team or league under the cursor |
 | `x` | unfollow it |
 | `o` | open the game on the web |
-| `/` | search every team in every league |
+| `/` | search teams and leagues together |
 | `[` `]` | previous or next day |
 | `t` | back to today |
 | `L` | the league list, where `f` follows a whole competition |
@@ -133,6 +164,20 @@ the corner of your eye means something actually happened.
 Game detail adds the line score by period, every scoring play, and the leaders
 where the sport publishes them.
 
+**A league view is today's card plus the standings.** Games alone left the view
+empty for most of the year — the NBA in August has no fixtures at all — so the
+table is the body of it and any games sit above. `enter` on a row there follows
+that team, which is the quickest way to pick clubs out of a competition you are
+looking at anyway.
+
+Standings are ordered the way each sport is actually read: soccer by its
+published `rank`, which already encodes goal difference and the rest of the
+tiebreakers; the NBA and MLB by win percentage; the NHL by points, since it
+publishes no win percentage and an overtime loss is still worth a point.
+`playoffSeed` is available almost everywhere and is deliberately *not* used as
+the default, because MLB seeds division winners first and that puts a 65-58 team
+above a 69-55 one.
+
 ## Notifications
 
 All off. Turn on only what you want:
@@ -142,7 +187,11 @@ omarchy bar set meirdick.scores notifyFinal true --json     # quietest useful se
 omarchy bar set meirdick.scores notifyScore true --json     # every score, both teams
 omarchy bar set meirdick.scores notifyStart true --json
 omarchy bar set meirdick.scores notifyClose true --json     # close game, late
+omarchy bar set meirdick.scores notifyLeagues true --json   # leagues too, not only your teams
 ```
+
+Alerts cover your followed **teams**. Followed leagues are silent unless
+`notifyLeagues` is on — see the table above.
 
 Alerts are derived by diffing polls, not from anything a provider pushes, so
 they behave the same whichever provider served the data. The first poll after a
@@ -250,12 +299,13 @@ strings must not have it.
 | `barFormat` | `full` | `full`, `compact`, `icon` |
 | `rotateSec` | `6` | seconds each live game holds the bar |
 | `showSituation` | `true` | count/outs/runners, down and distance |
-| `showAllGames` | `true` | the "Also today" section |
+| `showAllGames` | `false` | games from leagues polled only for a team you follow |
 | `finalWindowHours` | `8` | how long a final keeps the bar slot |
 | `notifyStart` | `false` | |
 | `notifyScore` | `false` | |
 | `notifyFinal` | `false` | |
 | `notifyClose` | `false` | |
+| `notifyLeagues` | `false` | alert for followed leagues too, not only your teams |
 | `closeMargin` | `1` | score gap that counts as close; ~6 for football |
 | `closeClockSec` | `300` | clock below which a close game qualifies |
 | `providerChain` | `""` | JSON, per league |
@@ -271,12 +321,14 @@ omarchy-shell meirdick.scores followLeague eng.1
 omarchy-shell meirdick.scores following               # teams and leagues, as JSON
 omarchy-shell meirdick.scores route standings:nfl    # "", leagues, league:mlb, standings:nfl, search
 omarchy-shell meirdick.scores diagnose               # JSON: what the widget believes
+omarchy-shell meirdick.scores state                  # JSON: route, cursor, focus
 ```
 
 `route` is bindable, so `standings:nfl` or `league:eng.1` can have its own
-hotkey. `diagnose` is the debug hatch: QML load failures and bad settings are
-both silent on screen, and this is the only practical way to see what the
-widget thinks is true.
+hotkey. `diagnose` and `state` are the debug hatches: QML load failures and bad
+settings are both silent on screen, and between them they are the only
+practical way to see what the widget thinks is true — `diagnose` for the data,
+`state` for where the panel is and what has focus.
 
 ## Development
 
@@ -289,7 +341,7 @@ Model.js         formatting, sorting, row building, the diff
 Leagues.js       canonical slug <-> each provider's own
 Indicators.qml   live / upcoming / final / delayed marks
 TeamCrest.qml    club badge, with a monogram when there is no logo
-ScoresMark.qml   the plugin's own mark
+ScoresMark.qml   the plugin's own mark, a pitch drawn from primitives
 ```
 
 The three `.js` files are pure functions with a `module.exports` tail, so they

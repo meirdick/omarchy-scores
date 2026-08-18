@@ -29,6 +29,15 @@ Panel {
   // problems keeps it meaningful when it does appear.
   readonly property color accent: Color.accent
   readonly property color divider: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.09)
+  // What club colours are drawn against, so their contrast can be judged.
+  readonly property color panelBackground: Color.popups.background
+  readonly property string panelBackgroundHex: {
+    function hex(v) {
+      var n = Math.max(0, Math.min(255, Math.round(v * 255))).toString(16)
+      return n.length === 1 ? "0" + n : n
+    }
+    return "#" + hex(panelBackground.r) + hex(panelBackground.g) + hex(panelBackground.b)
+  }
   readonly property color dim: Qt.darker(foreground, 1.55)
   readonly property color fainter: Qt.darker(foreground, 2.1)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
@@ -61,6 +70,11 @@ Panel {
     loading: service.loading,
     showAll: service.showAllGames,
     standings: service.standings,
+    standingsLeague: service.standingsLeague,
+    // Only the league view distinguishes "still fetching" from "nothing on".
+    // Feeding `refreshing` into the general loading flag would make the Today
+    // card flash "Loading…" on every poll.
+    leagueLoading: service.refreshing || service.loading,
     summary: service.summary,
     teams: service.teams,
     teamsLoading: service.teamsLoading,
@@ -113,22 +127,31 @@ Panel {
     if (!service) return ""
     if (service.lastError !== "") return service.lastError
     if (service.actionStatus !== "") return service.actionStatus
-    if (route === "search" && filter !== "") return rows.length + " matching  ·  f to follow"
+    if (route === "search" && filter !== "") {
+      // Count the results, not the rows — the section headings are not matches.
+      var hits = 0
+      for (var h = 0; h < rows.length; h++)
+        if (rows[h].kind === "team" || rows[h].kind === "league") hits++
+      return hits + (hits === 1 ? " match" : " matches") + "  ·  enter or f to follow"
+    }
     if (route === "search") return "type to search  ·  f to follow  ·  esc to leave"
     if (filtering) return rows.length + " matching  ·  esc to leave search"
     if (route !== "") return "h or esc to go back"
-    if (service.follows.length === 0) return "No teams followed — press / to search, f to follow"
-    var live = 0, following = 0
-    var set = Model.followSet(service.follows)
-    var leagues = Model.leagueSet(service.followedLeagues)
-    for (var i = 0; i < service.panelGames.length; i++) {
-      if (service.panelGames[i].state === "LIVE") live++
-      if (Model.isFollowedGame(set, service.panelGames[i], leagues)) following++
+    if (service.follows.length === 0 && service.followedLeagues.length === 0)
+      return "Nothing followed — press / for teams, L for leagues"
+    // Counted off the rows, not off everything polled. A league is fetched to
+    // find one club's game, and saying "11 games" above a card showing one
+    // was just wrong.
+    var live = 0, total = 0
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i].kind !== "game") continue
+      total++
+      if (rows[i].game.state === "LIVE") live++
     }
+    if (total === 0) return "Nothing you follow is on today"
     var parts = []
     if (live > 0) parts.push(live + " live")
-    parts.push(following + " of yours")
-    parts.push(service.games.length + " games")
+    parts.push(total + (total === 1 ? " game" : " games"))
     return parts.join("  ·  ")
   }
 
@@ -150,7 +173,34 @@ Panel {
     for (var j = cursorIndex; j >= 0; j--) if (selectableAt(j)) { cursorIndex = j; return }
   }
 
-  onRowsChanged: clampCursor()
+  // The row the cursor is on, tracked by identity rather than position.
+  //
+  // Following a team rewrites shell.json, which rebuilds every row and moves
+  // the team into a different section. Holding the cursor at an index then
+  // leaves it pointing at some unrelated row, and replacing the ListView's
+  // model scrolls it back to the top — so acting on a row threw you to the top
+  // of the panel looking at something else.
+  property string cursorKey: ""
+
+  function rememberCursor() {
+    var row = rows.length > 0 && cursorIndex >= 0 && cursorIndex < rows.length ? rows[cursorIndex] : null
+    cursorKey = row ? String(row.key) : ""
+  }
+
+  function indexOfKey(key) {
+    if (key === "") return -1
+    for (var i = 0; i < rows.length; i++) if (String(rows[i].key) === key) return i
+    return -1
+  }
+
+  onRowsChanged: {
+    var restored = indexOfKey(cursorKey)
+    if (restored >= 0 && restored !== cursorIndex) cursorIndex = restored
+    clampCursor()
+    // The model was replaced, so the view is back at the top whatever the
+    // cursor says. Put it back under the row the cursor is on.
+    if (cursorActive) Qt.callLater(function() { list.positionViewAtIndex(root.cursorIndex, ListView.Contain) })
+  }
 
   function moveCursor(dx, dy) {
     cursorActive = true
@@ -159,7 +209,12 @@ Panel {
       for (var guard = 0; guard < rows.length; guard++) {
         next += dy > 0 ? 1 : -1
         if (next < 0 || next >= rows.length) return
-        if (selectableAt(next)) { cursorIndex = next; list.positionViewAtIndex(next, ListView.Contain); return }
+        if (selectableAt(next)) {
+          cursorIndex = next
+          rememberCursor()
+          list.positionViewAtIndex(next, ListView.Contain)
+          return
+        }
       }
       return
     }
@@ -173,6 +228,7 @@ Panel {
     cursorActive = true
     cursorIndex = index
     clampCursor()
+    rememberCursor()
   }
 
   function pushRoute(next) {
@@ -182,8 +238,12 @@ Panel {
     routeCursors = remembered
     route = next
     cursorIndex = Model.firstSelectable(rows)
-    Qt.callLater(clampCursor)
-    Qt.callLater(function() { list.positionViewAtBeginning() })
+    cursorKey = ""
+    Qt.callLater(function() {
+      root.clampCursor()
+      root.rememberCursor()
+      list.positionViewAtBeginning()
+    })
   }
 
   function goBack() {
@@ -194,7 +254,11 @@ Panel {
     var restored = routeCursors[previous]
     route = previous
     cursorIndex = restored === undefined ? Model.firstSelectable(rows) : restored
-    Qt.callLater(clampCursor)
+    cursorKey = ""
+    Qt.callLater(function() {
+      root.clampCursor()
+      root.rememberCursor()
+    })
   }
 
   function activateCursor() {
@@ -209,8 +273,10 @@ Panel {
     }
     if (row.kind === "league") {
       // Polling follows the view: opening a competition you do not follow
-      // still has to fill it.
+      // still has to fill it. Standings come along because they are what the
+      // view is mostly made of.
       service.browsingLeague = row.league
+      service.loadStandings(row.league)
       pushRoute("league:" + row.league)
       return
     }
@@ -218,7 +284,14 @@ Panel {
       service.followTeam(row.league, row.abbr)
       return
     }
-    if (row.kind === "standing") return
+    // Enter on a standings row follows that team. It is the obvious thing to
+    // want from a list of every club in a competition, and it saves going back
+    // out to the search view to type a name you are already looking at.
+    if (row.kind === "standing") {
+      if (row.followed) service.flashStatus("Already following " + row.entry.abbr)
+      else service.followTeam(row.league, row.entry.abbr)
+      return
+    }
     if (row.kind === "action") {
       if (row.action === "leagues") { pushRoute("leagues"); return }
       if (row.action === "search") { startFiltering(true); return }
@@ -325,9 +398,46 @@ Panel {
 
   // ------------------------------------------------------------- lifecycle
 
+  // A route the caller wants applied once the panel is up. Without this the
+  // reset below, which fires when `opened` flips, lands after the caller's
+  // pushRoute and throws it away.
+  property string pendingRoute: ""
+
   function open() {
+    // Reset here rather than only in onOpenedChanged: summoning a panel that
+    // is already open changes nothing about `opened`, so the handler never
+    // runs and the panel stays on whatever league you last drilled into.
+    resetToToday()
     root.controller.show()
     if (service) service.panelOpen = true
+  }
+
+  function resetToToday() {
+    route = pendingRoute
+    pendingRoute = ""
+    filter = ""
+    // One invariant instead of a sequence: the search route always has its
+    // field open. Leaving that to the caller meant re-entering search while
+    // already on it reset the field away again, and the keystrokes fell
+    // through to the panel's own bindings.
+    filtering = route === "search"
+    cursorActive = false
+    if (service) {
+      if (route.indexOf("league:") !== 0) service.browsingLeague = ""
+      // The date is part of "where you were", same as the route. Opening the
+      // panel to find it still on next Tuesday because you paged there an hour
+      // ago is the same disorientation as opening it inside a league you have
+      // forgotten you drilled into.
+      service.setDateOffset(0)
+    }
+    cursorIndex = Model.firstSelectable(rows)
+    cursorKey = ""
+    list.positionViewAtBeginning()
+    Qt.callLater(function() {
+      root.cursorIndex = Model.firstSelectable(root.rows)
+      root.rememberCursor()
+      list.positionViewAtBeginning()
+    })
   }
 
   function close() {
@@ -346,21 +456,9 @@ Panel {
 
   onOpenedChanged: {
     if (service) service.panelOpen = opened
-    if (opened) {
-      route = ""
-      filter = ""
-      filtering = false
-      cursorIndex = Model.firstSelectable(rows)
-      cursorActive = false
-      // The view keeps its scroll offset between openings, so without this the
-      // panel can reopen halfway down last night's card with the first section
-      // clipped off the top.
-      list.positionViewAtBeginning()
-      Qt.callLater(function() {
-        root.cursorIndex = Model.firstSelectable(root.rows)
-        list.positionViewAtBeginning()
-      })
-    }
+    // Deliberately no reset here. open() already does it, and running it again
+    // when `opened` flips would land after the caller has chosen a route and
+    // throw that choice away.
   }
 
   Component.onCompleted: {
@@ -411,17 +509,44 @@ Panel {
     // Jump straight to a view: "", "leagues", "league:mlb", "standings:nfl".
     // Bindable to a hotkey, and the only way to drive the panel headlessly.
     function route(name: string): string {
-      root.open()
       var target = String(name || "")
+      // Handed to the panel rather than pushed after open(), because opening
+      // resets the view and would discard it.
+      root.pendingRoute = target
+      root.open()
       if (target.indexOf("standings:") === 0) root.service.loadStandings(target.slice(10))
+      // A league view is mostly its standings, so entering one over IPC has to
+      // fetch them the same way clicking into it does.
+      if (target.indexOf("league:") === 0) {
+        var slug = target.slice(7)
+        root.service.browsingLeague = slug
+        root.service.loadStandings(slug)
+      }
       if (target === "search") {
         // Same end state as pressing "/": the field is focused and waiting,
         // rather than a search view with nowhere to type.
         root.startFiltering(true)
         return "route search"
       }
-      root.pushRoute(target)
       return "route " + (target === "" ? "today" : target)
+    }
+
+    // Where the panel is, as opposed to what the service holds. Route and
+    // focus are not visible from diagnose(), and both matter when a keypress
+    // does something unexpected.
+    function state(): string {
+      return JSON.stringify({
+        opened: root.opened,
+        route: root.route === "" ? "today" : root.route,
+        filtering: root.filtering,
+        filter: root.filter,
+        cursorIndex: root.cursorIndex,
+        cursorKey: root.cursorKey,
+        cursorActive: root.cursorActive,
+        rows: root.rows.length,
+        fieldFocused: filterField.activeFocus,
+        catcherFocused: keyCatcher.activeFocus
+      }, null, 2)
     }
 
     function diagnose(): string { return root.service ? root.service.diagnose() : "no service" }
@@ -496,6 +621,23 @@ Panel {
                 accent: root.accent
                 markSize: Style.font.display
                 live: root.liveCount > 0
+              }
+            }
+
+            // One button, not two. Search covers teams and leagues both, so a
+            // separate "add a league" control would be a second door into the
+            // same room. It sits in the header so it is reachable from every
+            // view, not only from the bottom of the Today card.
+            trailingControl: Component {
+              PanelActionButton {
+                iconText: "+"
+                tooltipText: "Follow a team or league"
+                foreground: root.foreground
+                hoverColor: root.accent
+                fontFamily: root.fontFamily
+                bordered: true
+                visible: root.route !== "search"
+                onClicked: root.startFiltering(true)
               }
             }
           }
@@ -588,8 +730,8 @@ Panel {
     if (route === "search") return "f follow  ·  x unfollow  ·  / search again  ·  esc back"
     if (route.indexOf("game:") === 0) return "o open on the web  ·  f follow  ·  h back"
     if (route === "leagues") return "f follow league  ·  x unfollow  ·  l open  ·  h back"
-    if (route.indexOf("standings:") === 0) return "f follow  ·  x unfollow  ·  h back"
-    if (route.indexOf("league:") === 0) return "l detail  ·  f follow  ·  o web  ·  h back"
+    if (route.indexOf("standings:") === 0) return "enter or f follow  ·  x unfollow  ·  h back"
+    if (route.indexOf("league:") === 0) return "enter follow  ·  x unfollow  ·  o web  ·  h back"
     return "l detail  ·  f follow  ·  x unfollow  ·  / search  ·  [ ] day"
   }
 
@@ -770,24 +912,54 @@ Panel {
         NumberAnimation { target: scoreWash; property: "opacity"; from: 0.22; to: 0.0; duration: 900; easing.type: Easing.InCubic }
       }
 
-      // Followed games carry a spine in the followed team's own colour. It is
-      // the only place a team colour is load-bearing, and it is off to the side
-      // where it cannot make text unreadable on any theme.
-      Rectangle {
+      // A spine in your club's own colour, off to the side where it cannot
+      // make text unreadable on any theme.
+      //
+      // Only a club you follow gets one. A followed league also makes a game
+      // "yours", but marking all ten of its fixtures identically makes the one
+      // you actually care about impossible to pick out.
+      //
+      // Two halves rather than one bar, because following both clubs in a
+      // derby is the one case a single colour cannot answer "which of these is
+      // mine?". With one club followed both halves take the same colour and it
+      // reads as a single spine.
+      Column {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         anchors.topMargin: Style.space(5)
         anchors.bottomMargin: Style.space(5)
         width: Math.max(2, Style.space(3))
-        radius: width / 2
-        visible: row && row.followed
-        color: {
-          if (!gameRow.game) return root.foreground
-          var set = service ? Model.followSet(service.follows) : ({})
-          var mine = Model.isFollowedTeam(set, gameRow.game.league, gameRow.game.home.abbr)
-            ? gameRow.game.home : gameRow.game.away
-          return mine.color !== "" ? mine.color : root.foreground
+        visible: row && row.followedByTeam
+
+        readonly property var set: service ? Model.followSet(service.follows) : ({})
+        readonly property bool awayMine: gameRow.game
+          && Model.isFollowedTeam(set, gameRow.game.league, gameRow.game.away.abbr)
+        readonly property bool homeMine: gameRow.game
+          && Model.isFollowedTeam(set, gameRow.game.league, gameRow.game.home.abbr)
+        readonly property bool both: awayMine && homeMine
+
+        Repeater {
+          model: gameRow.game ? [gameRow.game.away, gameRow.game.home] : []
+          Rectangle {
+            required property var modelData
+            required property int index
+            width: parent.width
+            height: parent.height / 2
+            // Rounded at the outer ends only, so a split spine still reads as
+            // one object rather than two floating pills.
+            radius: parent.both ? 0 : parent.width / 2
+            color: {
+              var team = parent.both
+                ? modelData
+                : (parent.homeMine ? gameRow.game.home : gameRow.game.away)
+              // Two thirds of clubs have a near-black primary that would be
+              // invisible here; teamAccent falls back to the club's own bright
+              // alternate before giving up.
+              var picked = Model.teamAccent(team, root.panelBackgroundHex)
+              return picked !== "" ? picked : root.foreground
+            }
+          }
         }
       }
 
@@ -850,7 +1022,10 @@ Panel {
                 crestSize: Style.space(21)
                 source: modelData.team.logo
                 abbr: modelData.team.abbr
-                accent: modelData.team.color !== "" ? modelData.team.color : "transparent"
+                accent: {
+                  var picked = Model.teamAccent(modelData.team, root.panelBackgroundHex)
+                  return picked !== "" ? picked : "transparent"
+                }
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 dimmed: parent.faded
@@ -1053,7 +1228,8 @@ Panel {
           anchors.verticalCenter: parent.verticalCenter
           text: {
             if (!row) return ""
-            return (row.followed ? "★  " : "") + String(row.label || "")
+            var label = String(row.label || "")
+            return row.followed ? label + "  ★" : label
           }
           elide: Text.ElideRight
           color: root.foreground
@@ -1091,10 +1267,13 @@ Panel {
           id: simpleLabel
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
+          // The star trails the name. Leading it shifted every character right
+          // the moment you followed something, so the row you just acted on
+          // jumped sideways under the cursor.
           text: {
             if (!row) return ""
-            var mark = row.kind === "team" ? (row.followed ? "★  " : "☆  ") : ""
-            return mark + String(row.label || "")
+            var label = String(row.label || "")
+            return row.kind === "team" && row.followed ? label + "  ★" : label
           }
           color: root.foreground
           font.family: root.fontFamily
@@ -1165,7 +1344,7 @@ Panel {
           anchors.left: standingCrest.right
           anchors.leftMargin: Style.space(8)
           anchors.verticalCenter: parent.verticalCenter
-          text: row ? ((row.followed ? "★ " : "") + row.entry.name) : ""
+          text: row ? (row.entry.name + (row.followed ? "  ★" : "")) : ""
           elide: Text.ElideRight
           width: parent.width - Style.space(150)
           // Top of the table gets the emphasis; everyone else is reference.

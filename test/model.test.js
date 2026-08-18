@@ -8,6 +8,10 @@ function check(label, ok, detail) { if (!ok) { failures++; console.log("FAIL  " 
 function eq(label, actual, expected) { check(label, actual === expected, "got " + JSON.stringify(actual) + " want " + JSON.stringify(expected)) }
 
 var now = Date.now()
+var STANDINGS = [{ name: "American League", rows: [
+  { abbr: "TB",  name: "Tampa Bay Rays",   logo: "", wins: "74", losses: "49", ties: "0", streak: "L3" },
+  { abbr: "NYY", name: "New York Yankees", logo: "", wins: "69", losses: "55", ties: "0", streak: "W1" }
+] }]
 var mlb = P.espn.parseScoreboard(fs.readFileSync(__dirname + "/../fixtures/mlb.json", "utf8"), "mlb", now).games
 var live = mlb.filter(function(g) { return g.state === "LIVE" })[0]
 var pre = mlb.filter(function(g) { return g.state === "PRE" })[0]
@@ -189,8 +193,8 @@ eq("league list rejects team entries", M.normalizeLeagues(["mlb", "mlb:BOS"]).le
 
 console.log("\n=== follow actions are always offered ===")
 var fresh = M.buildRows({ route: "", games: [], follows: [], followedLeagues: [], now: now })
-check("fresh install offers add-a-team", fresh.some(function(r) { return r.action === "search" }))
-check("fresh install offers add-a-league", fresh.some(function(r) { return r.action === "leagues" }))
+check("fresh install offers a way to follow", fresh.some(function(r) { return r.action === "search" }))
+check("fresh install offers league browsing", fresh.some(function(r) { return r.action === "leagues" }))
 var busy = M.buildRows({ route: "", games: mlb, follows: ["mlb:" + liveHome], followedLeagues: [], now: now })
 check("still offered once following", busy.some(function(r) { return r.action === "search" }))
 check("and they do not lead once there are scores", busy[0].kind === "section" && busy[0].title === "Live")
@@ -217,6 +221,150 @@ eq("a widget that is not listed yields no keys", Object.keys(M.widgetSettingsFro
 check("half-written JSON returns null", M.widgetSettingsFrom('{"bar":{"lay', "meirdick.scores") === null)
 check("empty returns null", M.widgetSettingsFrom("", "meirdick.scores") === null)
 eq("a config with no bar yields no keys", Object.keys(M.widgetSettingsFrom('{"version":1}', "meirdick.scores")).length, 0)
+
+console.log("\n=== a team follow does not drag in its league ===")
+var oneTeam = M.buildRows({ route: "", games: mlb, follows: ["mlb:" + liveHome], followedLeagues: [], now: now })
+var shownGames = oneTeam.filter(function(r) { return r.kind === "game" })
+console.log("  following one club shows " + shownGames.length + " game(s) out of " + mlb.length + " on the card")
+eq("only the club's own games appear", shownGames.length, 1)
+check("and it is the club's game",
+      shownGames[0].game.home.abbr === liveHome || shownGames[0].game.away.abbr === liveHome)
+check("no section names another league's spillover",
+      !oneTeam.some(function(r) { return r.kind === "section" && r.title === "Live elsewhere" }))
+
+var withLeague = M.buildRows({ route: "", games: mlb, follows: ["mlb:" + liveHome], followedLeagues: ["mlb"], now: now })
+var leagueSection = withLeague.filter(function(r) { return r.kind === "section" && r.title === "MLB" })[0]
+check("following the league adds a section named for it", leagueSection !== undefined)
+eq("holding every other game on the card", Number(leagueSection.meta), mlb.length - 1)
+// Your own club must not be duplicated into the league's section.
+var ids = {}, dupes = 0
+withLeague.filter(function(r) { return r.kind === "game" }).forEach(function(r) {
+  if (ids[r.game.id]) dupes++
+  ids[r.game.id] = true
+})
+eq("no game is listed twice", dupes, 0)
+
+var order = withLeague.filter(function(r) { return r.kind === "section" }).map(function(r) { return r.title })
+console.log("  section order:", order.join(" -> "))
+check("your teams come before the league", order.indexOf("Live") < order.indexOf("MLB"))
+
+// The escape hatch, off by default.
+var everything = M.buildRows({ route: "", games: mlb, follows: ["mlb:" + liveHome],
+                               followedLeagues: [], showAll: true, now: now })
+check("showAll brings back the rest", everything.some(function(r) { return r.kind === "section" && r.title === "Also today" }))
+check("and it is absent by default", !oneTeam.some(function(r) { return r.kind === "section" && r.title === "Also today" }))
+
+console.log("\n=== a league follow is not the same as following every team ===")
+var before = {}, after = mlb.map(function(g) { return JSON.parse(JSON.stringify(g)) })
+mlb.forEach(function(g) { before[g.id] = JSON.parse(JSON.stringify(g)) })
+// Score in a game involving none of your clubs, in a league you follow.
+var neutral = after.filter(function(g) { return g.state === "LIVE" && g.home.abbr !== liveHome })[0]
+neutral.home.score = neutral.home.score + 1
+
+var quiet = M.diffGames(before, after, { follows: ["mlb:" + liveHome], leagues: ["mlb"] })
+console.log("  league followed, notifyLeagues off ->", quiet.length, "events")
+eq("a followed league stays quiet by default", quiet.length, 0)
+
+var loud = M.diffGames(before, after, { follows: ["mlb:" + liveHome], leagues: ["mlb"], notifyLeagues: true })
+console.log("  league followed, notifyLeagues on  ->", loud.length, "events")
+eq("until you ask for it", loud.length, 1)
+
+// A club you follow always alerts, whatever the league setting says.
+var mineScored = mlb.map(function(g) { return JSON.parse(JSON.stringify(g)) })
+var own = mineScored.filter(function(g) { return g.state === "LIVE" && g.home.abbr === liveHome })[0]
+own.home.score = own.home.score + 1
+eq("your own club always alerts",
+   M.diffGames(before, mineScored, { follows: ["mlb:" + liveHome], leagues: [] }).length, 1)
+
+console.log("\n=== a league view is never an empty box ===")
+var withGames = M.buildRows({ route: "league:mlb", games: mlb, follows: [], followedLeagues: [],
+  now: now, standings: STANDINGS, standingsLeague: "mlb" })
+check("games are listed", withGames.some(function(r) { return r.kind === "game" }))
+check("standings are listed under them", withGames.some(function(r) { return r.kind === "standing" }))
+var firstGame = withGames.findIndex(function(r) { return r.kind === "game" })
+var firstStanding = withGames.findIndex(function(r) { return r.kind === "standing" })
+check("games come first", firstGame < firstStanding, firstGame + " vs " + firstStanding)
+
+// The NBA in August: no card at all. This was an empty view before.
+var offSeason = M.buildRows({ route: "league:nba", games: [], follows: [], followedLeagues: [],
+  now: now, standings: STANDINGS, standingsLeague: "nba" })
+check("an off-season league still shows standings",
+      offSeason.some(function(r) { return r.kind === "standing" }))
+check("and says why there are no games",
+      offSeason.some(function(r) { return r.kind === "note" && /No games today/.test(r.text) }))
+
+var loading = M.buildRows({ route: "league:nba", games: [], follows: [], followedLeagues: [],
+  now: now, standings: [], standingsLeague: "", leagueLoading: true })
+check("mid-fetch says loading, not 'no games'",
+      loading.some(function(r) { return r.kind === "note" && /Loading/.test(r.text) }))
+// Standings for another league must never leak into this one.
+var wrongLeague = M.buildRows({ route: "league:nhl", games: [], follows: [], followedLeagues: [],
+  now: now, standings: STANDINGS, standingsLeague: "mlb" })
+check("another league's table does not leak in",
+      !wrongLeague.some(function(r) { return r.kind === "standing" }))
+
+// The standalone route and the inline table must agree.
+var standalone = M.buildRows({ route: "standings:mlb", games: [], follows: [], followedLeagues: [],
+  now: now, standings: STANDINGS, standingsLeague: "mlb" })
+eq("both paths build the same table",
+   standalone.filter(function(r) { return r.kind === "standing" }).length,
+   withGames.filter(function(r) { return r.kind === "standing" }).length)
+
+console.log("\n=== search covers leagues, not only teams ===")
+var TEAMS = [{ league: "eng.1", abbr: "ARS", name: "Arsenal", location: "London" },
+             { league: "mlb", abbr: "BOS", name: "Boston Red Sox", location: "Boston" }]
+function runSearch(q) {
+  return M.buildRows({ route: "search", games: [], follows: ["mlb:BOS"], followedLeagues: ["eng.1"],
+                       now: now, teams: TEAMS, filter: q })
+}
+var byLeagueName = runSearch("premier")
+console.log("  \"premier\" ->", byLeagueName.filter(function(r) { return r.kind === "league" }).map(function(r) { return r.label }).join(", "))
+check("a league name is findable", byLeagueName.some(function(r) { return r.kind === "league" && r.league === "eng.1" }))
+check("and shows it is already followed", byLeagueName.filter(function(r) { return r.kind === "league" })[0].followed === true)
+
+var byTeamName = runSearch("arsenal")
+check("teams still match", byTeamName.some(function(r) { return r.kind === "team" && r.abbr === "ARS" }))
+
+var bySport = runSearch("baseball")
+console.log("  \"baseball\" ->", bySport.filter(function(r) { return r.kind === "league" }).map(function(r) { return r.label }).join(", "))
+check("searching a sport finds its leagues", bySport.some(function(r) { return r.kind === "league" && r.league === "mlb" }))
+
+var empty = M.buildRows({ route: "search", games: [], follows: [], followedLeagues: [], now: now, teams: TEAMS, filter: "" })
+check("an empty query with nothing followed explains itself",
+      empty.some(function(r) { return r.kind === "note" && /team and league/.test(r.text) }))
+var listing = runSearch("")
+check("an empty query lists followed teams", listing.some(function(r) { return r.kind === "team" }))
+check("and followed leagues", listing.some(function(r) { return r.kind === "league" }))
+check("nonsense matches nothing", runSearch("zzzzzz").some(function(r) { return r.kind === "note" }))
+
+console.log("\n=== club colours have to be visible ===")
+var PANEL = "#05182e"
+eq("luminance of black", M.luminance("#000000"), 0)
+eq("garbage has no luminance", M.luminance("nope"), null)
+check("contrast is symmetric", M.contrastRatio("#ffffff", PANEL) === M.contrastRatio(PANEL, "#ffffff"))
+
+// The Pirates' primary is literally #000000 on a near-black panel.
+var pirates = { color: "#000000", altColor: "#fdb827" }
+eq("a black primary falls back to the alternate", M.teamAccent(pirates, PANEL), "#fdb827")
+var rays = { color: "#092c5c", altColor: "#8fbce6" }
+eq("so does a very dark navy", M.teamAccent(rays, PANEL), "#8fbce6")
+var reds = { color: "#c6011f", altColor: "#ffffff" }
+eq("a visible primary is kept", M.teamAccent(reds, PANEL), "#c6011f")
+eq("no colours at all yields none", M.teamAccent({ color: "", altColor: "" }, PANEL), "")
+// Both unusable: return something rather than nothing, and let the caller lift it.
+check("both dark still returns a colour",
+      M.teamAccent({ color: "#33006f", altColor: "#000000" }, PANEL) !== "")
+
+// Across a real slate, every club must end up with something that reads.
+var invisible = []
+mlb.forEach(function(g) {
+  [g.home, g.away].forEach(function(t) {
+    var picked = M.teamAccent(t, PANEL)
+    if (picked === "" || M.contrastRatio(picked, PANEL) < 1.9) invisible.push(t.abbr + " " + picked)
+  })
+})
+console.log("  clubs on today's slate with no readable colour:", invisible.length ? invisible.join(", ") : "none")
+eq("every club gets a readable colour", invisible.length, 0)
 
 console.log(failures === 0 ? "\nOK — all assertions passed" : "\n" + failures + " FAILURES")
 process.exit(failures === 0 ? 0 : 1)

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "meirdick.scores",
   "name": "Scores",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "author": "meirdick",
   "license": "MIT",
   "description": "Live sports scores in the Omarchy bar: follow teams across the US majors, college and world soccer, with a keyboard-driven scoreboard, standings and optional alerts.",
@@ -35,7 +35,7 @@
       "barFormat": "full",
       "rotateSec": 6,
       "showSituation": true,
-      "showAllGames": true,
+      "showAllGames": false,
       "finalWindowHours": 8,
       "notifyStart": false,
       "notifyScore": false,
@@ -45,7 +45,8 @@
       "closeClockSec": 300,
       "providerChain": "",
       "espnHost": "",
-      "followedLeagues": ""
+      "followedLeagues": "",
+      "notifyLeagues": false
     },
     "schema": [
       {
@@ -114,9 +115,9 @@
       {
         "key": "showAllGames",
         "type": "boolean",
-        "label": "Show games you do not follow",
-        "description": "Adds an \"Also today\" section under your own teams. Turn off for a panel that only ever shows your teams.",
-        "defaultValue": true
+        "label": "Show every game in polled leagues",
+        "description": "Adds an \"Also today\" section holding games from leagues that are only being polled because you follow a team in them. Off by default: following a club shows that club, not its whole division.",
+        "defaultValue": false
       },
       {
         "key": "finalWindowHours",
@@ -154,6 +155,13 @@
         "type": "boolean",
         "label": "Notify when a followed game gets close late",
         "description": "Fires once per game when the margin is within the threshold below and the game is in its last period.",
+        "defaultValue": false
+      },
+      {
+        "key": "notifyLeagues",
+        "type": "boolean",
+        "label": "Also notify for followed leagues",
+        "description": "By default only your followed teams raise notifications. Turn this on to alert for every game in a league you follow as well \u2014 loud, in proportion to how big the league is.",
         "defaultValue": false
       },
       {
