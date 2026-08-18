@@ -1088,18 +1088,6 @@ Panel {
                 Behavior on color { ColorAnimation { duration: 200 } }
               }
 
-              // Start time replaces the score column before the game exists as
-              // a contest, so the column is never a pair of meaningless zeroes.
-              Text {
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                visible: gameRow.token === "upcoming" && modelData.side === "away"
-                text: gameRow.game && gameRow.game.startUtc
-                  ? Model.clockTime(gameRow.game.startUtc, service ? service.formatTime : null) : ""
-                color: root.dim
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
-              }
             }
           }
 
